@@ -17,7 +17,8 @@
 //     命名空间 key; IP 变化 -> 命名空间变化 -> 自动用新会话 (核心)
 //   - 后台每 --ip-interval (默认 5 分钟) 探测一次出口IP, IP 变化自动更新
 //   - 探测服务默认: IPv4 -> https://api.ipify.org, IPv6 -> https://api6.ipify.org
-//     (可 --ip-url 覆盖); 探测失败时退化为 "4"/"6" 家族命名空间
+//     (可 --ip-url 覆盖); 探测失败不退出 (对应网络栈不可用也能启动), 命名空间退化为
+//     "4"/"6" 家族, 后台自动重试, 恢复后自动切回 "4|IP" 具体IP命名空间
 //
 // 用法:
 //
@@ -77,7 +78,7 @@ func usage() {
   请求未带 x-opencode-session -> 生成随机 ses_xxx 插入, 不放入 map
   请求带了 x-opencode-session -> 映射 原始->新ses_xxx, 命中缓存直接用, 否则新建并缓存
   每次请求前读取最新出口IP, 以 "4|1.2.3.4" 作为命名空间 key; IP 变化 -> 命名空间变化
-  -> 自动用新会话; IP 未知时退化为 "4"/"6"
+  -> 自动用新会话; 探测失败不退出, IP 未知时退化为 "4"/"6", 后台自动重试, 恢复即切回
   后台每 --ip-interval (默认 5m) 探测一次出口IP, IP 变化自动更新命名空间
   --cache-file <path> 把该映射持久化为嵌套 JSON {nsKey:{..}}, 重启/切网络仍保持
   (多个实例可共享同一缓存文件, 各自读写自己的命名空间)
@@ -226,8 +227,8 @@ func opencodeID(prefix string) string {
 }
 
 // ipProbe 周期性探测当前出口 IP (复用同一拨号器, 强制 family), 供会话按具体IP隔离。
-// 启动时探测失败即启动失败 (对应网络栈不可用); 运行期每 interval 探测一次,
-// 失败保留上次值, 会话命名空间退化为 family。
+// 启动/运行期探测失败都不退出: 保留上次值 (未成功过则为空), 会话命名空间退化为 family;
+// 网络恢复后下一次探测成功即切回具体 IP 命名空间。
 type ipProbe struct {
 	mu       sync.Mutex
 	mode     string
@@ -292,12 +293,17 @@ func (p *ipProbe) refresh() {
 	p.mu.Unlock()
 }
 
-// run 后台定时循环探测。
+// run 后台定时循环探测。从未探测成功时用更快节奏 (30s) 重试, 一旦成功切换为
+// 配置的 interval; 避免网络恢复后最多要等一个完整 interval 才换命名空间。
 func (p *ipProbe) run() {
-	ticker := time.NewTicker(p.interval)
+	const fastRetry = 30 * time.Second
+	ticker := time.NewTicker(fastRetry)
 	defer ticker.Stop()
 	for range ticker.C {
 		p.refresh()
+		if p.currentIP() != "" && p.interval != fastRetry {
+			ticker.Reset(p.interval)
+		}
 	}
 }
 
@@ -574,15 +580,17 @@ func main() {
 	}
 	probe := newIPProbe(mode, probeURL, transport, probeInterval)
 
-	// 启动即检测对应网络栈: 探测失败 = 对应 IPv4/IPv6 栈不可用 -> 启动失败 (退出码非0)。
-	// 注意: 必须用启动探测到的 IP 作为初始命名空间, 再启动后台定时探测。
+	// 启动探测出口 IP 作为初始命名空间。探测失败不退出: 对应网络栈不可用也能启动,
+	// 会话命名空间退化为家族 ("4"/"6"); 后台 run() 每 30s 快节奏重试, 网络恢复即自动
+	// 切回具体 IP 命名空间 (新会话自动换新)。
 	startIP, err := probe.probe()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "错误: 启动失败 - %v\n", err)
-		os.Exit(1)
+		log.Printf("警告: IPv%s 启动探测出口IP失败, 命名空间退化为家族(%s), 后台自动重试: %v",
+			mode, mode, err)
+	} else {
+		log.Printf("[ip-probe] IPv%s 启动检测成功, 当前出口IP=%s", mode, startIP)
+		probe.setIP(startIP)
 	}
-	log.Printf("[ip-probe] IPv%s 启动检测成功, 当前出口IP=%s", mode, startIP)
-	probe.setIP(startIP)
 	go probe.run()
 
 	// nsKey: 当前出口 IP 命名空间; IP 未知时退化为 mode ("4"/"6")
@@ -716,8 +724,11 @@ func main() {
 	} else {
 		log.Printf("  入站校验: 关闭 (默认)")
 	}
-	log.Printf("  出口IP探测: %s (每 %s 检测一次), 当前出口IP=%s",
-		probeURL, probeInterval, probe.currentIP())
+	if ip := probe.currentIP(); ip != "" {
+		log.Printf("  出口IP探测: %s (每 %s 检测一次), 当前出口IP=%s", probeURL, probeInterval, ip)
+	} else {
+		log.Printf("  出口IP探测: %s (每 %s 检测一次), 未知(退化为家族命名空间, 后台重试中)", probeURL, probeInterval)
+	}
 	if cacheFile != "" {
 		log.Printf("  会话缓存: 持久化到 %s (按 具体出口IP 隔离, 当前命名空间=%s, 共 %d 条)",
 			cacheFile, nsKey(), sessLen(sess, nsKey()))
