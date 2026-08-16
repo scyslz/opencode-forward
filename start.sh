@@ -4,7 +4,7 @@
 #   支持后台常驻 + 崩溃自动重启 (一直启动)
 #   默认启动【两个端口】: 一个 IPv4 出口 + 一个 IPv6 出口 (可 DUAL=0 关掉 ip6)
 #   默认转发到 https://opencode.ai/zen/v1
-#   自动注入完整 opencode CLI 特征头 + 会话缓存(按 IP家族 映射/落盘)
+#   自动注入完整 opencode CLI 特征头 + 会话缓存(按 当前出口IP 映射/落盘, 每5分钟检测IP变化)
 #
 # 用法:
 #   ./start.sh [start|stop|status|restart|run [port mode]]
@@ -31,13 +31,16 @@
 #   X_OPENCODE_CLIENT   x-opencode-client 默认 cli (固定)
 #   X_OPENCODE_PROJECT  x-opencode-project 默认 global (一般固定)
 #   DUMP                1 则开启 --dump (打印每条完整请求 header+body)  默认 0
+#   IP_INTERVAL         出口IP探测周期, 如 5m                       默认 5m
+#   IP_URL              出口IP探测服务 (默认 IPv4: https://api.ipify.org, IPv6: https://api6.ipify.org)
 #   EXTRA_ARGS          额外参数          默认为空(如 --header "X-Api-Key: k")
 #   LOG_DIR             日志目录          默认 ./logs
 #
 # 会话缓存:
 #   x-opencode-session 由 proxy 自动 映射/缓存 (落盘到 $LOG_DIR/session-cache.json),
-#   按 出口IP家族(4/6) 隔离: 同一原始 session 在 ip4/ip6 出口映射为不同 ses_xxx,
-#   切换 ip4/ip6 会话互不串号 (核心)。两个实例共享同一缓存文件, 各自读写自己的命名空间。
+#   按 当前具体出口IP 隔离 (命名空间形如 "4|1.2.3.4"): 出口IP变化 -> 命名空间变化
+#   -> 自动换新会话 (核心)。后台每 $IP_INTERVAL (默认 5m) 探测一次出口IP, 变化自动更新;
+#   探测失败时退化为家族("4"/"6")。多个实例共享同一缓存文件, 各自读写自己的命名空间。
 #   如需清零缓存: rm -f $LOG_DIR/session-cache.json
 # ============================================================
 set -euo pipefail
@@ -59,6 +62,8 @@ USER_AGENT="${USER_AGENT:-opencode/1.15.0 ai-sdk/provider-utils/4.0.23 runtime/b
 X_OPENCODE_CLIENT="${X_OPENCODE_CLIENT:-cli}"
 X_OPENCODE_PROJECT="${X_OPENCODE_PROJECT:-global}"
 DUMP="${DUMP:-0}"
+IP_INTERVAL="${IP_INTERVAL:-5m}"
+IP_URL="${IP_URL:-}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 LOG_DIR="${LOG_DIR:-$DIR/logs}"
 LOG_FILE="$LOG_DIR/opencode-zen-proxy.log"
@@ -78,6 +83,8 @@ build_args() {
     [ -n "$X_OPENCODE_CLIENT" ] && a+=(--header "x-opencode-client: $X_OPENCODE_CLIENT")
     [ -n "$X_OPENCODE_PROJECT" ] && a+=(--header "x-opencode-project: $X_OPENCODE_PROJECT")
     [ "$DUMP" = "1" ] && a+=(--dump)
+    a+=(--ip-interval "$IP_INTERVAL")
+    [ -n "$IP_URL" ] && a+=(--ip-url "$IP_URL")
     eval "a+=($EXTRA_ARGS)"
     # 以换行分隔输出, worker 用 mapfile 读回, 避免空参数丢失
     printf '%s\n' "${a[@]}"
@@ -214,9 +221,9 @@ case "${1:-start}" in
         echo "  start   默认起双实例: IPv4(端口 $PORT) + IPv6(端口 $PORT_IP6)   DUAL=0 只起 ip4"
         echo "  run [port mode]  前台单实例调试, 如: run 9002 6"
         echo "  环境变量: PORT PORT_IP6 DUAL MODE BACKEND OUTBOUND_AUTH INBOUND_AUTH FWD_INBOUND USER_AGENT"
-        echo "            X_OPENCODE_CLIENT X_OPENCODE_PROJECT DUMP"
+        echo "            X_OPENCODE_CLIENT X_OPENCODE_PROJECT DUMP IP_INTERVAL IP_URL"
         echo "            CACHE_FILE LOG_DIR EXTRA_ARGS"
-        echo "  (x-opencode-session 由 proxy 按 IP家族 映射/缓存并落盘; x-opencode-request 每次自动生成)"
+        echo "  (x-opencode-session 由 proxy 按 当前出口IP 映射/缓存并落盘; 每 $IP_INTERVAL 检测一次IP变化)"
         exit 1
         ;;
 esac

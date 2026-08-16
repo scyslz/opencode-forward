@@ -9,12 +9,15 @@
 //	x-opencode-session: ses_xxx                             每次"会话"映射/缓存 (见会话缓存)
 //	x-opencode-request: msg_xxx                             每次请求重新生成
 //
-// 会话缓存 (本地缓存, 按 出口IP家族 隔离, 切换 ip4/ip6 会话互不串号):
+// 会话缓存 (本地缓存, 按 当前具体出口IP 隔离; 出口IP变化自动换新会话):
 //   - 请求未带 x-opencode-session -> 生成随机 ses_xxx 插入到 header, 不放入 map
 //   - 请求带了  x-opencode-session -> 映射 原始x-opencode-session -> 新ses_xxx,
 //     命中缓存直接复用; 未命中则新建并把映射写入 map (可选 --cache-file 持久化)
-//   - 缓存按 出口IP家族(4/6) 命名空间隔离: 同一原始session 在 IPv4 与 IPv6 出口
-//     映射为两个不同的 ses_xxx, 保证 ip4/ip6 会话隔离 (核心)
+//   - 缓存按 当前出口IP 命名空间隔离: 每次请求前读取最新出口IP, 以 "4|1.2.3.4" 为
+//     命名空间 key; IP 变化 -> 命名空间变化 -> 自动用新会话 (核心)
+//   - 后台每 --ip-interval (默认 5 分钟) 探测一次出口IP, IP 变化自动更新
+//   - 探测服务默认: IPv4 -> https://api.ipify.org, IPv6 -> https://api6.ipify.org
+//     (可 --ip-url 覆盖); 探测失败时退化为 "4"/"6" 家族命名空间
 //
 // 用法:
 //
@@ -70,12 +73,14 @@ func usage() {
   x-opencode-session: ses_xxx          会话映射/缓存 (见下)
   x-opencode-request: msg_xxx          每次请求重新生成
 
-会话缓存 (本地缓存, 按 出口IP家族 隔离; 切换 ip4/ip6 会话互不串号 — 核心):
+会话缓存 (本地缓存, 按 当前具体出口IP 隔离; 出口IP变化自动换新会话 — 核心):
   请求未带 x-opencode-session -> 生成随机 ses_xxx 插入, 不放入 map
   请求带了 x-opencode-session -> 映射 原始->新ses_xxx, 命中缓存直接用, 否则新建并缓存
-  缓存按 IPv4/IPv6 命名空间隔离: 同一原始session 在 ip4 与 ip6 出口映射为不同 ses_xxx
-  --cache-file <path> 把该映射持久化为嵌套 JSON {4:{..}, 6:{..}}, 重启/切网络仍保持
-  (ip4/ip6 两个实例可共享同一缓存文件, 各自读写自己的命名空间)
+  每次请求前读取最新出口IP, 以 "4|1.2.3.4" 作为命名空间 key; IP 变化 -> 命名空间变化
+  -> 自动用新会话; IP 未知时退化为 "4"/"6"
+  后台每 --ip-interval (默认 5m) 探测一次出口IP, IP 变化自动更新命名空间
+  --cache-file <path> 把该映射持久化为嵌套 JSON {nsKey:{..}}, 重启/切网络仍保持
+  (多个实例可共享同一缓存文件, 各自读写自己的命名空间)
 
 选项:
   --verbose            打印每条请求日志 (方法/路径/会话映射)
@@ -90,6 +95,8 @@ func usage() {
   --cache-file <path>  会话映射持久化文件(JSON)
   --xff                追加 X-Forwarded-For (真实客户端 IP)
   --gen-request        兼容旧参数(现在 request 每次必生成, 该开关已无意义)
+  --ip-interval <dur>  出口IP探测周期, 如 5m (默认 5m; 后台检测IP变化, 变化自动换会话)
+  --ip-url <url>       出口IP探测服务 (默认 IPv4: https://api.ipify.org, IPv6: https://api6.ipify.org)
 
   [头优先级]  --outbound-auth/-F/--header > 自动生成(会话/request) > 默认特征头 > 客户端头
 
@@ -218,22 +225,99 @@ func opencodeID(prefix string) string {
 	return sb.String()
 }
 
-// sessionCache 本地会话映射缓存, 按 出口IP家族(4/6) 隔离:
-//
-//	family("4"|"6") -> (原始 x-opencode-session -> 生成的 ses_xxx)
-//
-// 核心: 切换 ip4/ip6 会话必须隔离。同一原始 session 在 IPv4 出口 与 IPv6 出口
-// 映射到两个不同的 ses_xxx, 互不串号。共享同一 --cache-file 的 ip4/ip6 两个实例
-// 各自读写自己的 family 命名空间, 且落盘前会重读磁盘以保留兄弟实例的条目。
-type sessionCache struct {
-	mu     sync.Mutex
-	family string                       // "4" 或 "6"
-	path   string                       // 持久化文件 (可选)
-	m      map[string]map[string]string // family -> (incoming -> ses_xxx)
+// ipProbe 周期性探测当前出口 IP (复用同一拨号器, 强制 family), 供会话按具体IP隔离。
+// 启动时探测失败即启动失败 (对应网络栈不可用); 运行期每 interval 探测一次,
+// 失败保留上次值, 会话命名空间退化为 family。
+type ipProbe struct {
+	mu       sync.Mutex
+	mode     string
+	url      string
+	current  string
+	trans    *http.Transport
+	interval time.Duration
 }
 
-func newSessionCache(family, path string) *sessionCache {
-	c := &sessionCache{family: family, path: path, m: map[string]map[string]string{}}
+func newIPProbe(mode, url string, t *http.Transport, interval time.Duration) *ipProbe {
+	return &ipProbe{mode: mode, url: url, trans: t, interval: interval}
+}
+
+// currentIP 返回最近一次探测到的出口 IP (空=尚未成功)。
+func (p *ipProbe) currentIP() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.current
+}
+
+// setIP 设置当前出口 IP (启动阶段使用, 后续由 refresh 维护)。
+func (p *ipProbe) setIP(ip string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.current = ip
+}
+
+// probe 执行一次出口 IP 探测, 返回当前出口 IP 或错误。
+// 复用与后端相同的强制家族拨号器: 连接/解析失败即视为对应网络栈不可用。
+func (p *ipProbe) probe() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.url, nil)
+	if err != nil {
+		return "", fmt.Errorf("构造探测请求失败: %w", err)
+	}
+	resp, err := p.trans.RoundTrip(req)
+	if err != nil {
+		return "", fmt.Errorf("IPv%s 网络栈不可用 (连接 %s 失败): %w", p.mode, p.url, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64))
+	ip := strings.TrimSpace(string(body))
+	if net.ParseIP(ip) == nil {
+		return "", fmt.Errorf("IPv%s 探测响应无有效 IP: %q", p.mode, body)
+	}
+	return ip, nil
+}
+
+// refresh 探测一次出口 IP, 成功则更新并打日志, 失败打日志并保留上次值。
+func (p *ipProbe) refresh() {
+	ip, err := p.probe()
+	if err != nil {
+		log.Printf("[ip-probe] IPv%s 探测失败: %v", p.mode, err)
+		return
+	}
+	p.mu.Lock()
+	if p.current != ip {
+		log.Printf("[ip-probe] IPv%s 出口IP变化: %q -> %q", p.mode, p.current, ip)
+	}
+	p.current = ip
+	p.mu.Unlock()
+}
+
+// run 后台定时循环探测。
+func (p *ipProbe) run() {
+	ticker := time.NewTicker(p.interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		p.refresh()
+	}
+}
+
+// sessionCache 本地会话映射缓存, 按 当前出口IP 隔离:
+//
+//	nsKey(mode|IP, 如 "4|1.2.3.4") -> (原始 x-opencode-session -> 生成的 ses_xxx)
+//
+// 核心: 出口 IP 变化 -> 命名空间变化 -> 自动换新会话。同一原始 session 在
+// 不同出口 IP 下映射为不同 ses_xxx, 互不串号。共享同一 --cache-file 的多个实例
+// 各自读写自己的 nsKey 命名空间, 且落盘前会重读磁盘以保留兄弟实例的条目。
+// 未探测到 IP 时 nsKey 退化为 mode ("4"/"6"), 与旧版本行为一致。
+type sessionCache struct {
+	mu     sync.Mutex
+	mode   string                       // "4" 或 "6" (IP 未知时的退化命名空间)
+	path   string                       // 持久化文件 (可选)
+	m      map[string]map[string]string // nsKey -> (incoming -> ses_xxx)
+}
+
+func newSessionCache(mode, path string) *sessionCache {
+	c := &sessionCache{mode: mode, path: path, m: map[string]map[string]string{}}
 	if path != "" {
 		if data, err := os.ReadFile(path); err == nil {
 			_ = json.Unmarshal(data, &c.m)
@@ -245,24 +329,24 @@ func newSessionCache(family, path string) *sessionCache {
 	return c
 }
 
-// resolve 处理单个请求的 x-opencode-session (在当前 family 内隔离)。
+// resolve 处理单个请求的 x-opencode-session (在 nsKey 命名空间内隔离)。
 //   - 未带 session: 生成随机 ses_xxx 并插入, 不放入 map
 //   - 带了 session: 映射 原始->生成的 ses_xxx, 命中缓存直接用, 否则新建并放入 map
 //
 // 返回要写入转发请求的 x-opencode-session 值。
-func (c *sessionCache) resolve(incoming string) string {
+func (c *sessionCache) resolve(nsKey, incoming string) string {
 	if incoming == "" {
 		return opencodeID("ses") // 不放入 map
 	}
 	if c.path != "" {
-		return c.resolvePersist(incoming)
+		return c.resolvePersist(nsKey, incoming)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	fam := c.m[c.family]
+	fam := c.m[nsKey]
 	if fam == nil {
 		fam = map[string]string{}
-		c.m[c.family] = fam
+		c.m[nsKey] = fam
 	}
 	if v, ok := fam[incoming]; ok {
 		return v
@@ -273,8 +357,8 @@ func (c *sessionCache) resolve(incoming string) string {
 }
 
 // resolvePersist 同 resolve, 但新建映射时同步落盘 (原子写)。
-// 写盘前先重读磁盘, 合并兄弟 family 实例新增的条目, 避免相互覆盖。
-func (c *sessionCache) resolvePersist(incoming string) string {
+// 写盘前先重读磁盘, 合并兄弟实例新增的条目, 避免相互覆盖。
+func (c *sessionCache) resolvePersist(nsKey, incoming string) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.path != "" {
@@ -285,10 +369,10 @@ func (c *sessionCache) resolvePersist(incoming string) string {
 			}
 		}
 	}
-	fam := c.m[c.family]
+	fam := c.m[nsKey]
 	if fam == nil {
 		fam = map[string]string{}
-		c.m[c.family] = fam
+		c.m[nsKey] = fam
 	}
 	if v, ok := fam[incoming]; ok {
 		return v
@@ -311,11 +395,11 @@ func (c *sessionCache) resolvePersist(incoming string) string {
 	return v
 }
 
-// sessLen 返回当前 family 命名的会话条数。
-func sessLen(c *sessionCache) int {
+// sessLen 返回当前 nsKey 命名的会话条数。
+func sessLen(c *sessionCache, nsKey string) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return len(c.m[c.family])
+	return len(c.m[nsKey])
 }
 
 // authSummary 启动日志用: 展示 Authorization 处理策略。
@@ -372,6 +456,8 @@ func main() {
 	inboundAuth := ""   // 入站客户端校验 token, 空=关闭; --inbound-auth 可开
 	fwdInbound := false // --forward-inbound-auth (-F): 转发时用 inbound-auth 的 token 作为 Authorization
 	cacheFile := ""
+	probeInterval := 5 * time.Minute // --ip-interval: 出口IP探测周期, 默认 5 分钟
+	probeURL := ""                   // --ip-url: 出口IP探测服务 (默认按家族选)
 	var extraHeaders []string         // --header "K: v" 可重复
 	var defaults = map[string]string{ // 默认特征头 (--header 可覆盖)
 		"User-Agent":         defaultUserAgent,
@@ -391,6 +477,27 @@ func main() {
 			xff = true
 		case arg == "--gen-request":
 			genRequest = true
+		case arg == "--ip-interval":
+			if i+1 < len(os.Args) {
+				i++
+				dur, err := time.ParseDuration(os.Args[i])
+				if err != nil || dur <= 0 {
+					fmt.Fprintln(os.Stderr, "错误: --ip-interval 需要合法时长, 如 5m")
+					os.Exit(1)
+				}
+				probeInterval = dur
+			} else {
+				fmt.Fprintln(os.Stderr, "错误: --ip-interval 需要时长参数")
+				os.Exit(1)
+			}
+		case arg == "--ip-url":
+			if i+1 < len(os.Args) {
+				i++
+				probeURL = os.Args[i]
+			} else {
+				fmt.Fprintln(os.Stderr, "错误: --ip-url 需要 URL 参数")
+				os.Exit(1)
+			}
 		case arg == "--outbound-auth" || arg == "--auth":
 			if i+1 < len(os.Args) {
 				i++
@@ -447,6 +554,45 @@ func main() {
 		listenAddr = ":" + listenAddr
 	}
 
+	transport := &http.Transport{
+		DialContext:         makeDialContext(mode),
+		ForceAttemptHTTP2:   true,
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
+
+	// 出口 IP 探测: 按具体 IP 隔离会话 (调用前读当前最新 IP)。
+	// 默认探测服务按家族选: IPv4 -> https://api.ipify.org, IPv6 -> https://api6.ipify.org
+	if probeURL == "" {
+		if mode == "6" {
+			probeURL = "https://api6.ipify.org"
+		} else {
+			probeURL = "https://api.ipify.org"
+		}
+	}
+	probe := newIPProbe(mode, probeURL, transport, probeInterval)
+
+	// 启动即检测对应网络栈: 探测失败 = 对应 IPv4/IPv6 栈不可用 -> 启动失败 (退出码非0)。
+	// 注意: 必须用启动探测到的 IP 作为初始命名空间, 再启动后台定时探测。
+	startIP, err := probe.probe()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "错误: 启动失败 - %v\n", err)
+		os.Exit(1)
+	}
+	log.Printf("[ip-probe] IPv%s 启动检测成功, 当前出口IP=%s", mode, startIP)
+	probe.setIP(startIP)
+	go probe.run()
+
+	// nsKey: 当前出口 IP 命名空间; IP 未知时退化为 mode ("4"/"6")
+	nsKey := func() string {
+		if ip := probe.currentIP(); ip != "" {
+			return mode + "|" + ip
+		}
+		return mode
+	}
+
 	sess := newSessionCache(mode, cacheFile)
 
 	// Rewrite: 改写转发请求的 scheme/host/path, 并注入 opencode 特征头。
@@ -463,9 +609,9 @@ func main() {
 			out.Header.Set(k, v)
 		}
 
-		// 2) 会话: 映射/生成 ses_xxx; request: 每次重新生成 msg_xxx
+		// 2) 会话: 按当前出口IP 命名空间 映射/生成 ses_xxx; request: 每次重新生成 msg_xxx
 		incomingSession := pr.In.Header.Get("X-Opencode-Session")
-		outSession := sess.resolve(incomingSession)
+		outSession := sess.resolve(nsKey(), incomingSession)
 		out.Header.Set("X-Opencode-Session", outSession)
 		out.Header.Set("X-Opencode-Request", opencodeID("msg"))
 
@@ -505,15 +651,6 @@ func main() {
 			log.Printf("[opencode-proxy] %s %s%s -> IPv%s session:%q->%q",
 				pr.In.Method, backendURL, pr.In.URL.Path, mode, incomingSession, outSession)
 		}
-	}
-
-	transport := &http.Transport{
-		DialContext:         makeDialContext(mode),
-		ForceAttemptHTTP2:   true,
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 100,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 10 * time.Second,
 	}
 
 	proxy := &httputil.ReverseProxy{
@@ -579,10 +716,13 @@ func main() {
 	} else {
 		log.Printf("  入站校验: 关闭 (默认)")
 	}
+	log.Printf("  出口IP探测: %s (每 %s 检测一次), 当前出口IP=%s",
+		probeURL, probeInterval, probe.currentIP())
 	if cacheFile != "" {
-		log.Printf("  会话缓存: 持久化到 %s (IPv%s 命名空间隔离, 共 %d 条)", cacheFile, mode, sessLen(sess))
+		log.Printf("  会话缓存: 持久化到 %s (按 具体出口IP 隔离, 当前命名空间=%s, 共 %d 条)",
+			cacheFile, nsKey(), sessLen(sess, nsKey()))
 	} else {
-		log.Printf("  会话缓存: 仅内存 (IPv%s 命名空间隔离, 不持久化)", mode)
+		log.Printf("  会话缓存: 仅内存 (按 具体出口IP 隔离, 当前命名空间=%s, 不持久化)", nsKey())
 	}
 	log.Printf("  示例: GET /a -> %s%s/a", backendURL, basePath)
 
