@@ -1,0 +1,4 @@
+opencode-proxy-net
+opencode-proxy-net.*.pid
+*.pid
+logs/
