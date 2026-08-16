@@ -1,25 +1,25 @@
-# opencode-proxy-net.service
-# 保存到 /etc/systemd/system/opencode-proxy-net.service 后:
+# opencode-zen-proxy.service
+# 保存到 /etc/systemd/system/opencode-zen-proxy.service 后:
 #   sudo systemctl daemon-reload
-#   sudo systemctl enable --now opencode-proxy-net
+#   sudo systemctl enable --now opencode-zen-proxy
 #
 # 修改端口/模式/授权token 请编辑下列 Environment 行。
 # x-opencode-session 由 proxy 自动映射/缓存(可加 --cache-file 落盘);
 # x-opencode-request 每次请求自动生成。
 [Unit]
-Description=opencode-proxy-net reverse proxy (to https://opencode.ai/zen)
+Description=opencode-zen-proxy reverse proxy (to https://opencode.ai/zen)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/ubuntu/proxy-listener
-ExecStart=/home/ubuntu/proxy-listener/opencode-proxy-net 9000 https://opencode.ai/zen/v1 4 \
+WorkingDirectory=/home/ubuntu/opencode-zen-proxy
+ExecStart=/home/ubuntu/opencode-zen-proxy/opencode-zen-proxy 9000 https://opencode.ai/zen/v1 4 \
     --auth public \
-    --cache-file /home/ubuntu/proxy-listener/logs/session-cache.json
+    --cache-file /home/ubuntu/opencode-zen-proxy/logs/session-cache.json
 Restart=always
 RestartSec=3
-# 输出日志到 systemd journal: journalctl -u opencode-proxy-net -f
+# 输出日志到 systemd journal: journalctl -u opencode-zen-proxy -f
 StandardOutput=journal
 StandardError=journal
 # 可选: 限制访问

@@ -1,4 +1,4 @@
-// opencode-proxy-net: 专属 opencode 反向代理 (仅 Go 标准库, 无第三方依赖)。
+// opencode-zen-proxy: 专属 opencode 反向代理 (仅 Go 标准库, 无第三方依赖)。
 //
 // 模仿 opencode CLI 的真实请求特征, 把完整 header 集自动注入到转发请求:
 //
@@ -18,7 +18,7 @@
 //
 // 用法:
 //
-//	opencode-proxy-net <监听端口> <backend> <4|6> [选项]
+//	opencode-zen-proxy <监听端口> <backend> <4|6> [选项]
 package main
 
 import (
@@ -53,7 +53,7 @@ const (
 )
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `opencode-proxy-net - 专属 opencode 反向代理 (Go 标准库, 模仿 opencode CLI 真实特征)
+	fmt.Fprintf(os.Stderr, `opencode-zen-proxy - 专属 opencode 反向代理 (Go 标准库, 模仿 opencode CLI 真实特征)
 
 用法:
   %s <监听端口> <backend> <4|6> [选项]
@@ -531,7 +531,7 @@ func main() {
 		authorized := handler
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !secureCompare(r.Header.Get("Authorization"), expected) {
-				w.Header().Set("WWW-Authenticate", `Bearer realm="opencode-proxy-net"`)
+				w.Header().Set("WWW-Authenticate", `Bearer realm="opencode-zen-proxy"`)
 				http.Error(w, "401 Unauthorized: missing or invalid Bearer token", http.StatusUnauthorized)
 				return
 			}
@@ -553,7 +553,7 @@ func main() {
 		MaxHeaderBytes: 1 << 20,
 	}
 
-	log.Printf("opencode-proxy-net 启动 (version %s):", version)
+	log.Printf("opencode-zen-proxy 启动 (version %s):", version)
 	log.Printf("  监听: %s (双栈 IPv4+IPv6)", ln.Addr())
 	log.Printf("  后端: %s//%s  基础路径: %s", scheme, host, basePath)
 	log.Printf("  模式: IPv%s (出口强制 IPv%s)", mode, mode)

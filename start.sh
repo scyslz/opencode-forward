@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# opencode-proxy-net 启动脚本
+# opencode-zen-proxy 启动脚本
 #   支持后台常驻 + 崩溃自动重启 (一直启动)
 #   默认启动【两个端口】: 一个 IPv4 出口 + 一个 IPv6 出口 (可 DUAL=0 关掉 ip6)
 #   默认转发到 https://opencode.ai/zen/v1
@@ -10,8 +10,8 @@
 #   ./start.sh [start|stop|status|restart|run [port mode]]
 #     默认无参数 = start
 #     start 默认起双实例:
-#         IPv4 出口 -> 端口 $PORT        (默认 9000)   pid: opencode-proxy-net.pid
-#         IPv6 出口 -> 端口 $PORT_IP6    (默认 9001)   pid: opencode-proxy-net-ip6.pid
+#         IPv4 出口 -> 端口 $PORT        (默认 9000)   pid: opencode-zen-proxy.pid
+#         IPv6 出口 -> 端口 $PORT_IP6    (默认 9001)   pid: opencode-zen-proxy-ip6.pid
 #     run [port mode]   前台运行单实例(带自动重启循环, 适合调试)
 #         ./start.sh run                  # 等价 run $PORT 4
 #         ./start.sh run 9002 6           # 单起一个 IPv6 出口实例
@@ -41,7 +41,7 @@ set -euo pipefail
 
 SELF="$0"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN="$DIR/opencode-proxy-net"
+BIN="$DIR/opencode-zen-proxy"
 
 # 默认配置
 PORT="${PORT:-9000}"
@@ -57,14 +57,14 @@ X_OPENCODE_PROJECT="${X_OPENCODE_PROJECT:-global}"
 DUMP="${DUMP:-0}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 LOG_DIR="${LOG_DIR:-$DIR/logs}"
-LOG_FILE="$LOG_DIR/proxy-listener.log"
-PIDFILE="${PIDFILE:-$DIR/opencode-proxy-net.pid}"
-PIDFILE_IP6="$DIR/opencode-proxy-net-ip6.pid"
+LOG_FILE="$LOG_DIR/opencode-zen-proxy.log"
+PIDFILE="${PIDFILE:-$DIR/opencode-zen-proxy.pid}"
+PIDFILE_IP6="$DIR/opencode-zen-proxy-ip6.pid"
 CACHE_FILE="${CACHE_FILE:-$LOG_DIR/session-cache.json}"
 
 log() { echo "[$(date '+%F %T')] $*" >> "$LOG_FILE"; }
 
-# build_args: 组装 opencode-proxy-net 命令行公共参数
+# build_args: 组装 opencode-zen-proxy 命令行公共参数
 build_args() {
     local -a a=(--verbose --cache-file "$CACHE_FILE")
     [ -n "$AUTH" ] && a+=(--auth "$AUTH")

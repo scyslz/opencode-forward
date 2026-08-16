@@ -1,0 +1,61 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build linux-${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            goarch: amd64
+          - arch: arm64
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+
+      - name: Build binary
+        run: |
+          mkdir -p dist/pkg
+          GOOS=linux GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
+            go build -trimpath -ldflags "-s -w" -o dist/pkg/opencode-zen-proxy main.go
+          cp start.sh dist/pkg/start.sh
+          cp opencode-zen-proxy.service dist/pkg/opencode-zen-proxy.service
+          chmod +x dist/pkg/opencode-zen-proxy dist/pkg/start.sh
+
+      - name: Package tar.gz
+        run: |
+          tar -C dist/pkg -czf dist/opencode-zen-proxy-linux-${{ matrix.arch }}.tar.gz .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opencode-zen-proxy-linux-${{ matrix.arch }}
+          path: dist/opencode-zen-proxy-linux-${{ matrix.arch }}.tar.gz
+
+  release:
+    name: Create Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.tar.gz
+          generate_release_notes: true

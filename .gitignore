@@ -1,4 +1,4 @@
-opencode-proxy-net
-opencode-proxy-net.*.pid
+opencode-zen-proxy
+opencode-zen-proxy.*.pid
 *.pid
 logs/
