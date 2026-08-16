@@ -22,8 +22,11 @@
 #   DUAL                1=默认起双实例(ip4+ip6); 0=只起 ip4  默认 1
 #   MODE                单实例/调试用出口模式 4/6              默认 4
 #   BACKEND             转发目标           默认 https://opencode.ai/zen/v1
-#   AUTH                授权token         默认 public (-> Authorization: Bearer public)
+#   OUTBOUND_AUTH       转发给后端的授权token (-> Bearer <token>)
+#                        默认空=透传客户端 Authorization (设置则注入 Bearer)
 #   INBOUND_AUTH        入站客户端校验token 默认空=关闭 (客户端需带 Bearer, 401否则)
+#   FWD_INBOUND         1=用 INBOUND_AUTH 的 token 作为转发给后端的 Authorization (-F)
+#                        默认 0; 与 OUTBOUND_AUTH 同时设置时 OUTBOUND_AUTH 优先
 #   USER_AGENT          User-Agent        默认 opencode/1.15.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13
 #   X_OPENCODE_CLIENT   x-opencode-client 默认 cli (固定)
 #   X_OPENCODE_PROJECT  x-opencode-project 默认 global (一般固定)
@@ -49,8 +52,9 @@ PORT_IP6="${PORT_IP6:-9001}"
 DUAL="${DUAL:-1}"
 MODE="${MODE:-4}"
 BACKEND="${BACKEND:-https://opencode.ai/zen/v1}"
-AUTH="${AUTH:-public}"
+OUTBOUND_AUTH="${OUTBOUND_AUTH:-}"
 INBOUND_AUTH="${INBOUND_AUTH:-}"
+FWD_INBOUND="${FWD_INBOUND:-0}"
 USER_AGENT="${USER_AGENT:-opencode/1.15.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13}"
 X_OPENCODE_CLIENT="${X_OPENCODE_CLIENT:-cli}"
 X_OPENCODE_PROJECT="${X_OPENCODE_PROJECT:-global}"
@@ -67,8 +71,9 @@ log() { echo "[$(date '+%F %T')] $*" >> "$LOG_FILE"; }
 # build_args: 组装 opencode-zen-proxy 命令行公共参数
 build_args() {
     local -a a=(--verbose --cache-file "$CACHE_FILE")
-    [ -n "$AUTH" ] && a+=(--auth "$AUTH")
+    [ -n "$OUTBOUND_AUTH" ] && a+=(--outbound-auth "$OUTBOUND_AUTH")
     [ -n "$INBOUND_AUTH" ] && a+=(--inbound-auth "$INBOUND_AUTH")
+    [ "$FWD_INBOUND" = "1" ] && a+=(-F)
     [ -n "$USER_AGENT" ] && a+=(--header "User-Agent: $USER_AGENT")
     [ -n "$X_OPENCODE_CLIENT" ] && a+=(--header "x-opencode-client: $X_OPENCODE_CLIENT")
     [ -n "$X_OPENCODE_PROJECT" ] && a+=(--header "x-opencode-project: $X_OPENCODE_PROJECT")
@@ -138,7 +143,13 @@ start() {
         rm -f "$PIDFILE_IP6"
         echo "IPv6 已跳过 (DUAL=0)"
     fi
-    echo "后端: $BACKEND   授权: Bearer $AUTH   DUMP=$DUMP"
+    if [ -n "$OUTBOUND_AUTH" ]; then
+        echo "后端: $BACKEND   转发授权: Bearer $OUTBOUND_AUTH   DUMP=$DUMP"
+    elif [ "$FWD_INBOUND" = "1" ] && [ -n "$INBOUND_AUTH" ]; then
+        echo "后端: $BACKEND   转发授权: Bearer $INBOUND_AUTH (-F)   DUMP=$DUMP"
+    else
+        echo "后端: $BACKEND   转发授权: 透传客户端Authorization   DUMP=$DUMP"
+    fi
     echo "入站校验: $([ -n "$INBOUND_AUTH" ] && echo "开启 Bearer $INBOUND_AUTH" || echo "关闭(默认)")"
     echo "会话缓存: $CACHE_FILE   日志: $LOG_FILE"
 }
@@ -202,7 +213,7 @@ case "${1:-start}" in
         echo "用法: $0 [start|stop|restart|status|run [port mode]]"
         echo "  start   默认起双实例: IPv4(端口 $PORT) + IPv6(端口 $PORT_IP6)   DUAL=0 只起 ip4"
         echo "  run [port mode]  前台单实例调试, 如: run 9002 6"
-        echo "  环境变量: PORT PORT_IP6 DUAL MODE BACKEND AUTH INBOUND_AUTH USER_AGENT"
+        echo "  环境变量: PORT PORT_IP6 DUAL MODE BACKEND OUTBOUND_AUTH INBOUND_AUTH FWD_INBOUND USER_AGENT"
         echo "            X_OPENCODE_CLIENT X_OPENCODE_PROJECT DUMP"
         echo "            CACHE_FILE LOG_DIR EXTRA_ARGS"
         echo "  (x-opencode-session 由 proxy 按 IP家族 映射/缓存并落盘; x-opencode-request 每次自动生成)"

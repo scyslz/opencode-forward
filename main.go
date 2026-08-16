@@ -2,7 +2,7 @@
 //
 // 模仿 opencode CLI 的真实请求特征, 把完整 header 集自动注入到转发请求:
 //
-//	Authorization:      Bearer public                      (代码写死默认, 强制覆盖客户端; --auth 可改)
+//	Authorization:      Bearer <token>                    (--outbound-auth 注入; 不传则透传客户端)
 //	User-Agent:         opencode/1.15.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13
 //	x-opencode-client:  cli                                 (固定, 不用每次换)
 //	x-opencode-project: global                              (一般固定)
@@ -46,7 +46,6 @@ import (
 const (
 	version          = "1.15.0"
 	defaultUserAgent = "opencode/" + version + " ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13"
-	defaultAuth      = "public"
 	defaultClient    = "cli"
 	defaultProject   = "global"
 	base62           = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -64,7 +63,7 @@ func usage() {
   4|6        出口模式: 4=强制IPv4, 6=强制IPv6
 
 自动注入的开源 CLI 特征头 (等价于 opencode zen 请求):
-  Authorization:      Bearer public      强制覆盖客户端授权 (代码写死默认; --auth 可改)
+  Authorization:      Bearer <token>       --outbound-auth 注入并覆盖客户端授权 (不传则透传客户端)
   User-Agent:         opencode/1.15.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13
   x-opencode-client:  cli              固定
   x-opencode-project: global           一般固定
@@ -81,20 +80,24 @@ func usage() {
 选项:
   --verbose            打印每条请求日志 (方法/路径/会话映射)
   --dump               打印完整转发请求特征: 全部 header + body (用于抓 opencode 真实特征)
-  --auth <token>       Authorization: Bearer <token> (默认 public)
+  --outbound-auth <token>  (旧名 --auth) 转发给后端 Authorization: Bearer <token>
+                         (不传则透传客户端 Authorization)
   --inbound-auth <token>  客户端访问本代理需带 Authorization: Bearer <token>
-                        不匹配返回 401 (默认关闭; 只校验入站, 不影响转发给后端的 --auth)
+                         不匹配返回 401 (默认关闭; 只校验入站, 不影响转发给后端的授权)
+  -F, --forward-inbound-auth  转发使用 inbound-auth 的 token 作为后端 Authorization
+                         (与 --outbound-auth 同时设置时 --outbound-auth 优先)
   --header "K: v"      追加任意头, 可重复; 优先级最高, 覆盖默认/自动头
   --cache-file <path>  会话映射持久化文件(JSON)
   --xff                追加 X-Forwarded-For (真实客户端 IP)
   --gen-request        兼容旧参数(现在 request 每次必生成, 该开关已无意义)
 
-  [头优先级]  --auth/--header > 自动生成(会话/request) > 默认特征头 > 客户端头
+  [头优先级]  --outbound-auth/-F/--header > 自动生成(会话/request) > 默认特征头 > 客户端头
 
 示例:
   %s 9000 https://opencode.ai/zen 4
-  %s 9000 https://opencode.ai/zen 6 --auth sk-xxx --cache-file ./logs/sess.json --verbose
-`, os.Args[0], os.Args[0], os.Args[0])
+  %s 9000 https://opencode.ai/zen 6 --outbound-auth sk-xxx --cache-file ./logs/sess.json --verbose
+  %s 9000 https://opencode.ai/zen 4 --inbound-auth sk-tok -F   # 入站校验 + 用同一 token 转发
+`, os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 	os.Exit(1)
 }
 
@@ -320,7 +323,7 @@ func authSummary(authToken string) string {
 	if authToken != "" {
 		return "Bearer " + authToken
 	}
-	return "保留客户端token(无则默认 Bearer public)"
+	return "透传客户端Authorization"
 }
 
 // dumpRequest 打印完整请求特征 (方法/URL/全部 header/body)。
@@ -365,8 +368,9 @@ func main() {
 	dump := false
 	xff := false
 	genRequest := false      // 兼容旧参数, 现在 request 每次必生成, 无实际作用
-	authToken := defaultAuth // 代码写死默认 Bearer public; --auth 可改
-	inboundAuth := ""        // 入站客户端校验 token, 空=关闭; --inbound-auth 可开
+	authToken := ""     // 空=不注入 Authorization, 保留客户端原始头; --outbound-auth 可改
+	inboundAuth := ""   // 入站客户端校验 token, 空=关闭; --inbound-auth 可开
+	fwdInbound := false // --forward-inbound-auth (-F): 转发时用 inbound-auth 的 token 作为 Authorization
 	cacheFile := ""
 	var extraHeaders []string         // --header "K: v" 可重复
 	var defaults = map[string]string{ // 默认特征头 (--header 可覆盖)
@@ -387,14 +391,16 @@ func main() {
 			xff = true
 		case arg == "--gen-request":
 			genRequest = true
-		case arg == "--auth":
+		case arg == "--outbound-auth" || arg == "--auth":
 			if i+1 < len(os.Args) {
 				i++
 				authToken = os.Args[i]
 			} else {
-				fmt.Fprintln(os.Stderr, "错误: --auth 需要 token 参数")
+				fmt.Fprintln(os.Stderr, "错误: --outbound-auth 需要 token 参数")
 				os.Exit(1)
 			}
+		case arg == "--forward-inbound-auth" || arg == "-F":
+			fwdInbound = true
 		case arg == "--inbound-auth":
 			if i+1 < len(os.Args) {
 				i++
@@ -470,9 +476,16 @@ func main() {
 			}
 		}
 
-		// 4) Authorization: 强制注入 Bearer public(代码写死默认, 强制覆盖客户端授权)。
-		//    --auth/--header (最高优先级) 仍可覆盖; --header 又优先于 --auth。
-		out.Header.Set("Authorization", "Bearer "+authToken)
+		// 4) Authorization (转发给后端): 优先级 从上到下
+		//    a) --outbound-auth <token>  -> Bearer <token>
+		//    b) -F/--forward-inbound-auth -> Bearer <inbound-auth> (用入站校验token转发)
+		//    c) 均未设置 -> 透传客户端原始 Authorization
+		//    --header (最高优先级) 仍可覆盖; --header 又优先于 a/b。
+		if authToken != "" {
+			out.Header.Set("Authorization", "Bearer "+authToken)
+		} else if fwdInbound && inboundAuth != "" {
+			out.Header.Set("Authorization", "Bearer "+inboundAuth)
+		}
 		for _, h := range extraHeaders {
 			k, v, ok := strings.Cut(h, ":")
 			if !ok {
@@ -557,9 +570,11 @@ func main() {
 	log.Printf("  监听: %s (双栈 IPv4+IPv6)", ln.Addr())
 	log.Printf("  后端: %s//%s  基础路径: %s", scheme, host, basePath)
 	log.Printf("  模式: IPv%s (出口强制 IPv%s)", mode, mode)
-	log.Printf("  特征头: User-Agent=%s client=%s project=%s auth=%s",
+	log.Printf("  特征头: User-Agent=%s client=%s project=%s outbound-auth=%s",
 		defaultUserAgent, defaultClient, defaultProject, authSummary(authToken))
-	if inboundAuth != "" {
+	if fwdInbound && inboundAuth != "" {
+		log.Printf("  入站校验: 开启 (客户端需 Authorization: Bearer %s); 转发使用同一 token (-F)", inboundAuth)
+	} else if inboundAuth != "" {
 		log.Printf("  入站校验: 开启 (客户端需 Authorization: Bearer %s)", inboundAuth)
 	} else {
 		log.Printf("  入站校验: 关闭 (默认)")
