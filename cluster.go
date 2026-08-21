@@ -184,12 +184,15 @@ func (n *clusterNode) Enabled() bool {
 
 func (n *clusterNode) Start(forward func(r *http.Request) (*http.Response, error)) error {
 	n.onForward = forward
+	if n.keepAlive <= 0 {
+		n.keepAlive = 60 * time.Second
+	}
 	if n.cfg.ListenAddr != "" {
 		ln, err := net.Listen("tcp", n.cfg.ListenAddr)
 		if err != nil {
 			return err
 		}
-		n.listener = ln
+		n.listener = tls.NewListener(ln, n.tlsCfg)
 		go n.acceptLoop()
 	}
 	for _, p := range n.cfg.Peers {
@@ -241,25 +244,27 @@ func (n *clusterNode) acceptLoop() {
 		if err != nil {
 			return
 		}
+		if tlsConn, ok := c.(*tls.Conn); ok {
+			if hErr := tlsConn.Handshake(); hErr != nil {
+				log.Printf("[cluster] 接受连接 TLS握手失败: %v", hErr)
+				_ = c.Close()
+				continue
+			}
+		}
 		go n.handleConn(c)
 	}
 }
 
 func (n *clusterNode) joinLoop() {
 	for {
-		var c net.Conn
 		tc, err := tls.Dial("tcp", n.cfg.JoinAddr, n.tlsCfg)
 		if err != nil {
-			c2, err2 := net.DialTimeout("tcp", n.cfg.JoinAddr, 5*time.Second)
-			if err2 != nil {
-				log.Printf("[cluster] 加入地址 %s 不可达: %v, 3s重试", n.cfg.JoinAddr, err2)
-				time.Sleep(3 * time.Second)
-				continue
-			}
-			c = c2
-		} else {
-			c = net.Conn(tc)
+			log.Printf("[cluster] 加入地址 %s TLS握手失败: %v, 3s重试", n.cfg.JoinAddr, err)
+			time.Sleep(3 * time.Second)
+			continue
 		}
+		c := net.Conn(tc)
+		log.Printf("[cluster] 节点 %s 与 %s TLS握手成功", n.selfID, n.cfg.JoinAddr)
 		setTCPKeepAlive(c, n.keepAlive)
 		log.Printf("[cluster] 节点 %s 已加入 %s (keepalive=%s)", n.selfID, n.cfg.JoinAddr, n.keepAlive)
 		n.joinMu.Lock()

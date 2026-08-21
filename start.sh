@@ -89,15 +89,7 @@ worker() {
     mapfile -t args < <(build_args)
     echo "=== worker 启动: 端口=$PORT backend=$BACKEND egress-prefer=$EGRESS_PREFER ==="
     log "worker 启动: 端口=$PORT backend=$BACKEND egress-prefer=$EGRESS_PREFER cache=$CACHE_FILE cluster=$CLUSTER_LISTEN/$CLUSTER_JOIN"
-    while true; do
-        if "$BIN" "$PORT" "$BACKEND" "${args[@]}" >> "$LOG_FILE" 2>&1; then
-            log "端口$PORT 进程退出(0), 3秒后重启"
-        else
-            local rc=$?
-            log "端口$PORT 进程异常退出($rc), 3秒后重启"
-        fi
-        sleep 3
-    done
+    "$BIN" "$PORT" "$BACKEND" "${args[@]}" >> "$LOG_FILE" 2>&1
 }
 
 is_running() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
