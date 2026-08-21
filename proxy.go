@@ -201,9 +201,9 @@ func (p *Proxy) buildOutbound(in *http.Request, outSession string) *http.Request
 		}
 	}
 	if p.cfg.authToken != "" {
-		out.Header.Set("Authorization", "Bearer "+p.cfg.authToken)
+		out.Header.Set("Authorization", p.cfg.authToken)
 	} else if p.cfg.fwdInbound && p.cfg.inboundAuth != "" {
-		out.Header.Set("Authorization", "Bearer "+p.cfg.inboundAuth)
+		out.Header.Set("Authorization", p.cfg.inboundAuth)
 	}
 	for _, h := range p.cfg.extraHeaders {
 		k, v, ok := strings.Cut(h, ":")

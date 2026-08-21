@@ -53,6 +53,7 @@ func usage() {
   -F, --forward-inbound-auth  转发使用 inbound-auth 的 token 作为后端 Authorization
   --header "K: v"      追加任意头, 可重复; 优先级最高, 覆盖默认/自动头
   --cache-file <path>  会话映射持久化文件(JSON)
+  --tunnel-file <path> 集群隧道连接信息持久化文件(JSON), 记录建立/关闭/帧数
   --xff                追加 X-Forwarded-For
   --gen-request        兼容旧参数(已无意义)
   --ip-interval <dur>  出口IP探测周期, 如 5m (默认 5m)
@@ -289,6 +290,9 @@ func main() {
 		log.Printf("  会话缓存: 持久化到 %s (按 具体出口IP 隔离)", cacheFile)
 	} else {
 		log.Printf("  会话缓存: 仅内存 (按 具体出口IP 隔离, 不持久化)")
+	}
+	if clusterNode.tunnels != nil && clusterNode.tunnels.path != "" {
+		log.Printf("  隧道信息: 持久化到 %s (记录建立/关闭/帧数)", clusterNode.tunnels.path)
 	}
 	if clusterNode.Enabled() {
 		log.Printf("  集群: id=%s listen=%s join=%s peers=%v failover-on=%v", clusterNode.selfID, clusterCfg.ListenAddr, clusterCfg.JoinAddr, clusterCfg.Peers, clusterCfg.FailoverOn)
