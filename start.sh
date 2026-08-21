@@ -159,7 +159,19 @@ status() {
 restart() { stop; sleep 1; start; }
 
 case "${1:-start}" in
-    start) start ;;
+    start)
+        if [ -n "$CLUSTER_LISTEN" ] && [ -n "$CLUSTER_JOIN" ]; then
+            echo "错误: CLUSTER_LISTEN 与 CLUSTER_JOIN 不能同时设置"
+            exit 1
+        fi
+        if [ -n "$CLUSTER_LISTEN" ]; then
+            start_listen
+        elif [ -n "$CLUSTER_JOIN" ]; then
+            start_join
+        else
+            start
+        fi
+        ;;
     start-listen) start_listen ;;
     start-join) start_join ;;
     stop) stop ;;

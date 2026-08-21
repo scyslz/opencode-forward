@@ -67,6 +67,7 @@ type clusterNode struct {
 	tlsCfg   *tls.Config
 	peerConns sync.Map
 	onForward func(r *http.Request) (*http.Response, error)
+	keepAlive time.Duration
 }
 
 func (n *clusterNode) SetForwarder(fn func(r *http.Request) (*http.Response, error)) { n.onForward = fn }
@@ -171,6 +172,16 @@ func (n *clusterNode) Start(forward func(r *http.Request) (*http.Response, error
 	return nil
 }
 
+func setTCPKeepAlive(c net.Conn, d time.Duration) {
+	if tlsConn, ok := c.(*tls.Conn); ok {
+		c = tlsConn.NetConn()
+	}
+	if tcp, ok := c.(*net.TCPConn); ok {
+		_ = tcp.SetKeepAlive(true)
+		_ = tcp.SetKeepAlivePeriod(d)
+	}
+}
+
 func (n *clusterNode) loopPeerTunnel(addr string) {
 	for {
 		c, err := tls.Dial("tcp", addr, n.tlsCfg)
@@ -179,8 +190,9 @@ func (n *clusterNode) loopPeerTunnel(addr string) {
 			time.Sleep(3 * time.Second)
 			continue
 		}
+		setTCPKeepAlive(c, n.keepAlive)
 		n.peerConns.Store(addr, c)
-		log.Printf("[cluster] peer %s 隧道已建立", addr)
+		log.Printf("[cluster] peer %s 隧道已建立 (keepalive=%s)", addr, n.keepAlive)
 		n.handleConn(c)
 		n.peerConns.Delete(addr)
 		_ = c.Close()
@@ -205,6 +217,7 @@ func (n *clusterNode) joinLoop() {
 		if err != nil {
 			c2, err2 := net.DialTimeout("tcp", n.cfg.JoinAddr, 5*time.Second)
 			if err2 != nil {
+				log.Printf("[cluster] 加入地址 %s 不可达: %v, 3s重试", n.cfg.JoinAddr, err2)
 				time.Sleep(3 * time.Second)
 				continue
 			}
@@ -212,10 +225,13 @@ func (n *clusterNode) joinLoop() {
 		} else {
 			c = net.Conn(tc)
 		}
+		setTCPKeepAlive(c, n.keepAlive)
+		log.Printf("[cluster] 节点 %s 已加入 %s (keepalive=%s)", n.selfID, n.cfg.JoinAddr, n.keepAlive)
 		n.joinMu.Lock()
 		n.joinConn = c
 		n.joinMu.Unlock()
 		n.handleConn(c)
+		log.Printf("[cluster] 节点 %s 与 %s 的连接已断开, 3s后重连", n.selfID, n.cfg.JoinAddr)
 		n.joinMu.Lock()
 		n.joinConn = nil
 		n.joinMu.Unlock()
@@ -268,8 +284,13 @@ func (n *clusterNode) probeLoop() {
 
 func (n *clusterNode) handleConn(c net.Conn) {
 	defer c.Close()
+	if tcp, ok := c.(*net.TCPConn); ok {
+		_ = tcp.SetKeepAlive(true)
+		_ = tcp.SetKeepAlivePeriod(n.keepAlive)
+	}
 	reader := bufio.NewReader(c)
 	for {
+		_ = c.SetReadDeadline(time.Now().Add(2 * n.keepAlive))
 		var l int32
 		if err := binary.Read(reader, binary.BigEndian, &l); err != nil {
 			return

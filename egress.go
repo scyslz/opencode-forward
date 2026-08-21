@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const unavailableCool = 30 * time.Second
+const (
+	unavailableCool     = 30 * time.Second
+	maxUnavailableCool  = 10 * time.Minute
+)
 
 type ipProbe struct {
 	mu       sync.Mutex
@@ -21,6 +24,7 @@ type ipProbe struct {
 	current  string
 	trans    *http.Transport
 	interval time.Duration
+	failCount int
 }
 
 func newIPProbe(mode, url string, t *http.Transport, interval time.Duration) *ipProbe {
@@ -62,24 +66,39 @@ func (p *ipProbe) probe() (string, error) {
 func (p *ipProbe) refresh() {
 	ip, err := p.probe()
 	if err != nil {
+		p.mu.Lock()
+		p.failCount++
+		p.mu.Unlock()
 		log.Printf("[ip-probe] IPv%s 探测失败: %v", p.mode, err)
 		return
 	}
 	p.mu.Lock()
 	if p.current != ip {
 		log.Printf("[ip-probe] IPv%s 出口IP变化: %q -> %q", p.mode, p.current, ip)
+		p.failCount = 0
 	}
 	p.current = ip
 	p.mu.Unlock()
 }
 
 func (p *ipProbe) run() {
-	const fastRetry = 30 * time.Second
-	ticker := time.NewTicker(fastRetry)
+	ticker := time.NewTicker(p.interval)
 	defer ticker.Stop()
 	for range ticker.C {
 		p.refresh()
-		if p.currentIP() != "" && p.interval != fastRetry {
+		p.mu.Lock()
+		fc := p.failCount
+		cur := p.current
+		p.mu.Unlock()
+		if fc > 0 {
+			d := unavailableCool * time.Duration(1<<uint(fc-1))
+			if d > maxUnavailableCool {
+				d = maxUnavailableCool
+			}
+			ticker.Reset(d)
+			continue
+		}
+		if cur != "" {
 			ticker.Reset(p.interval)
 		}
 	}
@@ -262,7 +281,12 @@ func (m *egressManager) egressOrder(r *http.Request) []string {
 		}
 		return []string{v, other}
 	}
-	if m.egressPrefer == "auto" {
+	switch m.egressPrefer {
+	case "d4":
+		return []string{"4"}
+	case "d6":
+		return []string{"6"}
+	case "auto":
 		if m.isUnavailable("6") && !m.isUnavailable("4") {
 			return []string{"4", "6"}
 		}
@@ -270,8 +294,7 @@ func (m *egressManager) egressOrder(r *http.Request) []string {
 			return []string{"6", "4"}
 		}
 		return []string{"6", "4"}
-	}
-	if m.egressPrefer == "4" {
+	case "4":
 		return []string{"4", "6"}
 	}
 	return []string{"6", "4"}

@@ -126,8 +126,10 @@ func main() {
 			if i+1 < len(extraArgs) {
 				i++
 				egressPrefer = extraArgs[i]
-				if egressPrefer != "4" && egressPrefer != "6" && egressPrefer != "auto" {
-					fmt.Fprintln(os.Stderr, "错误: --prefer/--egress-prefer 必须是 4/6/auto")
+				switch egressPrefer {
+				case "4", "6", "auto", "d4", "d6":
+				default:
+					fmt.Fprintln(os.Stderr, "错误: --prefer/--egress-prefer 必须是 4/6/auto/d4/d6")
 					os.Exit(1)
 				}
 			}
