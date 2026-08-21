@@ -233,7 +233,20 @@ func main() {
 	log.Printf("opencode-zen-proxy 启动 (version %s):", version)
 	log.Printf("  监听: %s (单口双栈 6→4, 失败标记%s不可用, 双栈失败再集群)", ln.Addr(), unavailableCool)
 	log.Printf("  后端: %s//%s  基础路径: %s", scheme, host, basePath)
-	log.Printf("  出口: 优先 IPv%s (X-Egress可覆盖, auto为并发)", egressPrefer)
+	var egressDesc string
+	switch egressPrefer {
+	case "d4":
+		egressDesc = "强制 IPv4 (无回退)"
+	case "d6":
+		egressDesc = "强制 IPv6 (无回退)"
+	case "4":
+		egressDesc = "优先 IPv4 (4→6)"
+	case "6":
+		egressDesc = "优先 IPv6 (6→4)"
+	case "auto":
+		egressDesc = "并发竞速(auto HappyEyeballs)"
+	}
+	log.Printf("  出口: %s (X-Egress可覆盖)", egressDesc)
 	log.Printf("  特征头: User-Agent=%s client=%s project=%s outbound-auth=%s", defaultUserAgent, defaultClient, defaultProject, authSummary(authToken))
 	if fwdInbound && inboundAuth != "" {
 		log.Printf("  入站校验: 开启 (客户端需 Authorization: Bearer %s); 转发使用同一 token (-F)", inboundAuth)
