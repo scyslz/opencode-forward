@@ -32,7 +32,7 @@ jobs:
         run: |
           mkdir -p dist/pkg
           GOOS=linux GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
-            go build -trimpath -ldflags "-s -w" -o dist/pkg/opencode-zen-proxy main.go
+            go build -trimpath -ldflags "-s -w" -o dist/pkg/opencode-zen-proxy .
           cp start.sh dist/pkg/start.sh
           cp opencode-zen-proxy.service dist/pkg/opencode-zen-proxy.service
           chmod +x dist/pkg/opencode-zen-proxy dist/pkg/start.sh

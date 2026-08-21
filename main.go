@@ -19,7 +19,7 @@ const (
 )
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `opencode-zen-proxy - 专属 opencode 反向代理 (Go 标准库, 模仿 opencode CLI 真实特征)
+	fmt.Fprintf(os.Stderr, `opencode-zen-proxy - 专属 opencode 流量转发 (Go 标准库, 模仿 opencode CLI 真实特征)
 
 用法:
   %s <监听端口> <backend> [选项]
@@ -47,7 +47,7 @@ func usage() {
   --verbose            打印每条请求日志
   --dump               打印完整转发请求特征: 全部 header + body
   --outbound-auth <token>  转发给后端 Authorization: Bearer <token>
-  --inbound-auth <token>   客户端访问本代理需带 Authorization: Bearer <token>
+  --inbound-auth <token>   客户端访问本服务需带 Authorization: Bearer <token>
   -F, --forward-inbound-auth  转发使用 inbound-auth 的 token 作为后端 Authorization
   --header "K: v"      追加任意头, 可重复; 优先级最高, 覆盖默认/自动头
   --cache-file <path>  会话映射持久化文件(JSON)
