@@ -4,12 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -135,12 +139,43 @@ func newClusterNode(cfg clusterConfig) *clusterNode {
 	if cfg.ID == "" {
 		cfg.ID = "node-" + randomHex(4)
 	}
+	cert, err := genSelfSignedCert()
+	if err != nil {
+		log.Printf("[cluster] 生成内存自签证书失败, 退化为明文: %v", err)
+	}
+	tlsCfg := &tls.Config{
+		InsecureSkipVerify: true,
+		Certificates:       []tls.Certificate{cert},
+	}
 	return &clusterNode{
 		cfg:    cfg,
 		selfID: cfg.ID,
 		peers:  map[string]*clusterPeer{},
-		tlsCfg: &tls.Config{InsecureSkipVerify: true},
+		tlsCfg: tlsCfg,
 	}
+}
+
+func genSelfSignedCert() (tls.Certificate, error) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	return tls.Certificate{
+		Certificate: [][]byte{certDER},
+		PrivateKey:  priv,
+	}, nil
 }
 
 func (n *clusterNode) Enabled() bool {
