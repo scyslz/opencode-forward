@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -209,7 +211,16 @@ func main() {
 	}
 	proxy := newProxy(proxyCfg, egress, sess)
 	proxy.SetCluster(clusterNode)
-	if err := clusterNode.Start(nil); err != nil {
+	clusterForward := func(r *http.Request) (*http.Response, error) {
+		fam := r.Header.Get(clusterHdrEgress)
+		if fam == "" {
+			fam = "4"
+		}
+		body, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+		return proxy.doLocal(context.Background(), fam, r, body)
+	}
+	if err := clusterNode.Start(clusterForward); err != nil {
 		fmt.Fprintf(os.Stderr, "集群启动失败: %v\n", err)
 		os.Exit(1)
 	}
