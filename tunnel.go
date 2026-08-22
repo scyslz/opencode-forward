@@ -75,12 +75,28 @@ func (s *tunnelStore) open(id, dir, peerID, remote, local string) *tunnelRecord 
 	return r
 }
 
+func (s *tunnelStore) touch(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r := s.records[id]; r != nil {
+		r.LastFrame = time.Now()
+	}
+}
 func (s *tunnelStore) frame(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if r := s.records[id]; r != nil {
 		r.LastFrame = time.Now()
 		r.Frames++
+	}
+}
+func (s *tunnelStore) heartbeat(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r := s.records[id]; r != nil {
+		r.LastFrame = time.Now()
+		r.Frames++
+		s.save()
 	}
 }
 func (s *tunnelStore) close(id string) {

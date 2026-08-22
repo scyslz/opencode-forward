@@ -365,31 +365,31 @@ func (n *clusterNode) probeLoop() {
 		n.mu.RUnlock()
 		for _, p := range list {
 			start := time.Now()
-			client := &http.Client{Timeout: 3 * time.Second}
-			req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+p.Addr+clusterPingPath, nil)
-			if n.cfg.Token != "" {
-				req.Header.Set(clusterHdrToken, n.cfg.Token)
-			}
-			resp, err := client.Do(req)
+			dummyURL, _ := url.Parse(clusterPingPath)
+			dummyReq := &http.Request{Method: http.MethodGet, URL: dummyURL, Header: http.Header{}}
+			visited := []string{n.selfID}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			resp, err := n.ForwardToPeer(ctx, p, dummyReq, nil, visited, 0)
+			cancel()
 			rtt := time.Since(start).Milliseconds()
 			n.mu.Lock()
 			peer := n.peers[p.ID]
 			if peer != nil {
 				peer.RTTms = rtt
-				if err != nil || resp.StatusCode != http.StatusOK {
+				if err != nil || resp == nil || resp.StatusCode != http.StatusOK {
 					if resp != nil {
 						resp.Body.Close()
 					}
 					if err != nil {
-						log.Printf("[cluster] ping peer %s fail: %v", p.Addr, err)
+						log.Printf("[cluster] ping peer %s fail (tunnel): %v", p.Addr, err)
 					} else {
-						resp.Body.Close()
-						log.Printf("[cluster] ping peer %s status=%d", p.Addr, resp.StatusCode)
+						log.Printf("[cluster] ping peer %s status=%d (tunnel)", p.Addr, resp.StatusCode)
 					}
 					n.mu.Unlock()
 					continue
 				}
 				resp.Body.Close()
+				log.Printf("[cluster] ping peer %s ok rtt=%dms (tunnel)", p.Addr, rtt)
 			}
 			n.mu.Unlock()
 		}
@@ -424,9 +424,6 @@ func (n *clusterNode) handleConn(c net.Conn, tunnelID string) {
 		if err := json.Unmarshal(buf, &wf); err != nil {
 			continue
 		}
-		if tunnelID != "" {
-			n.tunnels.frame(tunnelID)
-		}
 		if wf.StatusCode != nil {
 			var body []byte
 			if wf.BodyLen > 0 {
@@ -435,7 +432,36 @@ func (n *clusterNode) handleConn(c net.Conn, tunnelID string) {
 					return
 				}
 			}
+			if tunnelID != "" {
+				n.tunnels.heartbeat(tunnelID)
+			}
 			n.deliverPending(wf.ID, wf.StatusCode, wf.Header, body)
+			continue
+		}
+		if tunnelID != "" {
+			n.tunnels.heartbeat(tunnelID)
+		}
+		if wf.Path == clusterPingPath {
+			var discard []byte
+			if wf.BodyLen > 0 {
+				discard = make([]byte, wf.BodyLen)
+				if _, err := io.ReadFull(reader, discard); err != nil {
+					continue
+				}
+			}
+			if wf.StatusCode == nil {
+				respBody := []byte("pong")
+				rf := clusterRespFrame{ID: wf.ID, StatusCode: 200, Header: map[string][]string{}, BodyLen: int64(len(respBody))}
+				rfb, _ := json.Marshal(rf)
+				var rlb [4]byte
+				binary.BigEndian.PutUint32(rlb[:], uint32(len(rfb)))
+				mu := n.connLock(c)
+				mu.Lock()
+				_, _ = c.Write(rlb[:])
+				_, _ = c.Write(rfb)
+				_, _ = c.Write(respBody)
+				mu.Unlock()
+			}
 			continue
 		}
 		h := clusterFrameHeader{
