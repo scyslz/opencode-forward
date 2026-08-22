@@ -554,13 +554,9 @@ func (n *clusterNode) handleConn(c net.Conn, tunnelID string) {
 			Egress:  wf.Egress,
 			BodyLen: wf.BodyLen,
 		}
-		if h.Hop > maxHop {
-			continue
-		}
 		visited := append([]string(nil), h.Visited...)
 		visited = append(visited, n.selfID)
 		h.Visited = visited
-		h.Hop = h.Hop + 1
 		u, _ := url.Parse(h.Path)
 		if u == nil || u.Path == "" {
 			u = &url.URL{Path: "/"}
