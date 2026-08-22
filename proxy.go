@@ -103,6 +103,40 @@ func authSummary(authToken string) string {
 	return "透传客户端Authorization"
 }
 
+func isStreamRequest(body []byte) bool {
+	if bytes.Contains(body, []byte(`"stream":true`)) || bytes.Contains(body, []byte(`"stream": true`)) || bytes.Contains(body, []byte(`"stream":1`)) {
+		return true
+	}
+	return false
+}
+
+func rewriteStreamFalse(body []byte) []byte {
+	nb := bytes.ReplaceAll(body, []byte(`"stream":true`), []byte(`"stream":false`))
+	nb = bytes.ReplaceAll(nb, []byte(`"stream": true`), []byte(`"stream":false`))
+	nb = bytes.ReplaceAll(nb, []byte(`"stream":1`), []byte(`"stream":false`))
+	return nb
+}
+
+func isEmptySSE(data []byte) bool {
+	if len(data) == 0 {
+		return true
+	}
+	s := string(data)
+	if strings.Contains(s, `"delta"`) && strings.Contains(s, `"content"`) {
+		return false
+	}
+	if strings.Contains(s, `"choices":[]`) || strings.Contains(s, `"choices": []`) {
+		if !strings.Contains(s, `"text"`) && !strings.Contains(s, `"content":"`) {
+			return true
+		}
+	}
+	trim := strings.TrimSpace(s)
+	if trim == "" {
+		return true
+	}
+	return false
+}
+
 func dumpRequest(r *http.Request) {
 	var b strings.Builder
 	b.WriteString("\n----- opencode 请求特征 -----\n")
@@ -230,6 +264,11 @@ func (p *Proxy) doLocal(ctx context.Context, fam string, in *http.Request, body 
 		outReq.Body = io.NopCloser(bytes.NewReader(body))
 		outReq.ContentLength = int64(len(body))
 	}
+	isStream := bytes.Contains(body, []byte(`"stream":true`)) || bytes.Contains(body, []byte(`"stream": true`))
+	if isStream {
+		outReq.Header.Set("Accept", "text/event-stream")
+		outReq.Header.Set("Cache-Control", "no-cache")
+	}
 	outReq = outReq.WithContext(ctx)
 	tr := p.egress.transport(fam)
 	resp, err := tr.RoundTrip(outReq)
@@ -237,7 +276,7 @@ func (p *Proxy) doLocal(ctx context.Context, fam string, in *http.Request, body 
 		return nil, err
 	}
 	if p.cfg.verbose {
-		log.Printf("[opencode-proxy] %s %s%s -> IPv%s session:%q->%q status=%d", in.Method, p.cfg.backendURL, in.URL.Path, fam, incomingSession, outSession, resp.StatusCode)
+		log.Printf("[opencode-proxy] %s %s%s -> IPv%s session:%q->%q status=%d stream=%v ct=%q cl=%d", in.Method, p.cfg.backendURL, in.URL.Path, fam, incomingSession, outSession, resp.StatusCode, isStream, resp.Header.Get("Content-Type"), resp.ContentLength)
 	}
 	return resp, nil
 }
@@ -334,9 +373,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if p.egress.isUnavailable(fam) {
 				continue
 			}
-			ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+			ctx2 := ctx
+			var cancel context.CancelFunc
+			if !isStreamRequest(body) {
+				ctx2, cancel = context.WithTimeout(ctx, 30*time.Second)
+			}
 			resp, err := p.doLocal(ctx2, fam, r, body)
-			cancel()
+			if cancel != nil {
+				cancel()
+			}
 			if err != nil {
 				isTO := strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline")
 				if isTO && p.cluster != nil && !p.cluster.ShouldFailover(0, true) {
@@ -364,9 +409,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if p.egress.isStackDown(fam) {
 				continue
 			}
-			ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+			ctx2 := ctx
+			var cancel context.CancelFunc
+			if !isStreamRequest(body) {
+				ctx2, cancel = context.WithTimeout(ctx, 30*time.Second)
+			}
 			resp, err := p.doLocal(ctx2, fam, r, body)
-			cancel()
+			if cancel != nil {
+				cancel()
+			}
 			if err != nil {
 				if isStackErrStatic(err) {
 					p.egress.markStackDown(fam, true)
@@ -387,6 +438,41 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if resp, ok := tryLocalFamilies(r.Context()); ok {
+		if isStreamRequest(body) && resp.StatusCode == 200 && strings.Contains(resp.Header.Get("Content-Type"), "event-stream") {
+			for k, vv := range resp.Header {
+				for _, v := range vv {
+					if strings.EqualFold(k, "Content-Length") {
+						continue
+					}
+					w.Header().Add(k, v)
+				}
+			}
+			w.Header().Del("Content-Length")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			w.WriteHeader(resp.StatusCode)
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			notify := r.Context().Done()
+			done := make(chan error, 1)
+			go func() {
+				_, err := io.Copy(w, resp.Body)
+				done <- err
+			}()
+			select {
+			case <-notify:
+				resp.Body.Close()
+				log.Printf("[sse] 客户端断开, 中止上游流")
+				return
+			case err := <-done:
+				resp.Body.Close()
+				if err != nil {
+					log.Printf("[sse] 本地流结束 err=%v", err)
+				}
+				return
+			}
+		}
 		defer resp.Body.Close()
 		for k, vv := range resp.Header {
 			for _, v := range vv {
@@ -447,3 +533,68 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Error(w, "502 Bad Gateway", http.StatusBadGateway)
 }
+
+func (p *Proxy) responseLooksEmpty(resp *http.Response) bool {
+	ct := resp.Header.Get("Content-Type")
+	if ct != "" && !strings.Contains(ct, "text/event-stream") && !strings.Contains(ct, "event-stream") {
+		return false
+	}
+	return false
+}
+
+
+
+func (p *Proxy) retryAsNonStream(body []byte, order []string) *http.Response {
+	nb := rewriteStreamFalse(body)
+	var fixed *http.Response
+	for _, fam := range order {
+		if p.egress.isUnavailable(fam) {
+			continue
+		}
+		ctx2, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		tmpReq := &http.Request{Method: "POST", URL: mustParse("/chat/completions"), Header: http.Header{"Content-Type": []string{"application/json"}}}
+		resp2, err2 := p.doLocal(ctx2, fam, tmpReq, nb)
+		cancel()
+		if err2 != nil {
+			continue
+		}
+		if resp2.StatusCode == 200 {
+			fixed = resp2
+			break
+		}
+		resp2.Body.Close()
+	}
+	if fixed == nil {
+		return nil
+	}
+	fb, _ := io.ReadAll(fixed.Body)
+	fixed.Body.Close()
+	var m map[string]any
+	if json.Unmarshal(fb, &m) == nil {
+		if ch, ok := m["choices"].([]any); ok && len(ch) > 0 {
+			if c0, ok := ch[0].(map[string]any); ok {
+				if msg, ok := c0["message"].(map[string]any); ok {
+					content, _ := msg["content"].(string)
+					if content != "" {
+						id, _ := m["id"].(string)
+						if id == "" {
+							id = opencodeID("resp")
+						}
+						sse := fmt.Sprintf("data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":%s}}]}\n\ndata: [DONE]\n", id, mustJSONString(content))
+						fixed.Body = io.NopCloser(strings.NewReader(sse))
+						fixed.Header.Set("Content-Type", "text/event-stream")
+						fixed.Header.Set("Cache-Control", "no-cache")
+						fixed.Header.Del("Content-Length")
+						fixed.Header.Set("Transfer-Encoding", "chunked")
+						return fixed
+					}
+				}
+			}
+		}
+	}
+	fixed.Body = io.NopCloser(bytes.NewReader(fb))
+	return fixed
+}
+
+func mustParse(p string) *url.URL    { u, _ := url.Parse(p); return u }
+func mustJSONString(s string) string { b, _ := json.Marshal(s); return string(b) }

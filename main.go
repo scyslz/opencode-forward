@@ -236,7 +236,7 @@ func main() {
 
 	srv := &http.Server{
 		Handler:        handler,
-		ReadTimeout:    60 * time.Second,
+		ReadTimeout:    0,
 		WriteTimeout:   0,
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20,

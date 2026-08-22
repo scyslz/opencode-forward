@@ -70,14 +70,19 @@ type clusterConfig struct {
 }
 
 type pendingResp struct {
-	rf   clusterRespFrame
-	body []byte
-	err  error
+	rf     clusterRespFrame
+	body   []byte
+	err    error
+	chunk  []byte
+	isChunk bool
+	done   bool
 }
 
 type pendingEntry struct {
 	ch   chan pendingResp
 	conn net.Conn
+	streamCh chan pendingResp
+	isStream bool
 }
 
 type clusterWireFrame struct {
@@ -91,6 +96,10 @@ type clusterWireFrame struct {
 	BodyLen    int64                `json:"body_len"`
 	StatusCode *int                 `json:"status_code"`
 	Header     map[string][]string  `json:"header"`
+	IsChunk    bool                 `json:"is_chunk,omitempty"`
+	Chunk      []byte               `json:"chunk,omitempty"`
+	Done       bool                 `json:"done,omitempty"`
+	Stream     bool                 `json:"stream,omitempty"`
 }
 
 type clusterNode struct {
@@ -424,6 +433,13 @@ func (n *clusterNode) handleConn(c net.Conn, tunnelID string) {
 		if err := json.Unmarshal(buf, &wf); err != nil {
 			continue
 		}
+		if wf.IsChunk || wf.Done {
+			if tunnelID != "" {
+				n.tunnels.heartbeat(tunnelID)
+			}
+			n.deliverChunk(wf.ID, wf.Chunk, wf.Done, wf.StatusCode, wf.Header)
+			continue
+		}
 		if wf.StatusCode != nil {
 			var body []byte
 			if wf.BodyLen > 0 {
@@ -508,8 +524,44 @@ func (n *clusterNode) handleConn(c net.Conn, tunnelID string) {
 			log.Printf("[cluster] 服务端未配置转发器, 丢弃帧 id=%s method=%s path=%s", h.ID, h.Method, h.Path)
 			ferr = fmt.Errorf("服务端未配置转发器, 无法处理集群帧")
 		} else {
-			log.Printf("[cluster] 转发请求 id=%s method=%s path=%s headers=%v", h.ID, fwdReq.Method, fwdReq.URL.RequestURI(), fwdReq.Header)
+			log.Printf("[cluster] 转发请求 id=%s method=%s path=%s headers=%v stream=%v", h.ID, fwdReq.Method, fwdReq.URL.RequestURI(), fwdReq.Header, wf.Stream)
 			resp, ferr = n.onForward(fwdReq)
+		}
+		if wf.Stream && resp != nil && ferr == nil && resp.StatusCode == 200 && isSSEHeader(resp.Header) {
+			hdrs := cloneHeaderMap(resp.Header)
+			mu := n.connLock(c)
+			mu.Lock()
+			initFrame := clusterWireFrame{ID: h.ID, StatusCode: intPtr(200), Header: hdrs, IsChunk: false, Stream: true}
+			if err := writeFrame(c, initFrame, nil); err != nil {
+				mu.Unlock()
+				resp.Body.Close()
+				return
+			}
+			mu.Unlock()
+			buf := make([]byte, 4096)
+			for {
+				nbytes, rerr := resp.Body.Read(buf)
+				if nbytes > 0 {
+					chunk := make([]byte, nbytes)
+					copy(chunk, buf[:nbytes])
+					mu.Lock()
+					cf := clusterWireFrame{ID: h.ID, IsChunk: true, Chunk: chunk}
+					werr := writeFrame(c, cf, nil)
+					mu.Unlock()
+					if werr != nil {
+						break
+					}
+				}
+				if rerr != nil {
+					break
+				}
+			}
+			resp.Body.Close()
+			mu.Lock()
+			doneFrame := clusterWireFrame{ID: h.ID, Done: true}
+			_ = writeFrame(c, doneFrame, nil)
+			mu.Unlock()
+			continue
 		}
 		var respBody []byte
 		if resp != nil && resp.Body != nil {
@@ -622,9 +674,14 @@ func (n *clusterNode) connLock(c net.Conn) *sync.Mutex {
 func (n *clusterNode) forwardViaFrame(ctx context.Context, conn net.Conn, orig *http.Request, body []byte, visited []string, hop int) (*http.Response, error) {
 	mu := n.connLock(conn)
 	reqID := "r-" + randomHex(8)
+	isStream := bytes.Contains(bytes.ToLower(body), []byte(`"stream":true`)) || bytes.Contains(body, []byte(`"stream": true`))
 	ch := make(chan pendingResp, 1)
+	var streamCh chan pendingResp
+	if isStream {
+		streamCh = make(chan pendingResp, 64)
+	}
 	n.pendingMu.Lock()
-	n.pending[reqID] = pendingEntry{ch: ch, conn: conn}
+	n.pending[reqID] = pendingEntry{ch: ch, conn: conn, streamCh: streamCh, isStream: isStream}
 	n.pendingMu.Unlock()
 	defer func() {
 		n.pendingMu.Lock()
@@ -632,7 +689,7 @@ func (n *clusterNode) forwardViaFrame(ctx context.Context, conn net.Conn, orig *
 		n.pendingMu.Unlock()
 	}()
 
-	fh := clusterFrameHeader{
+	wf := clusterWireFrame{
 		ID:      reqID,
 		Method:  orig.Method,
 		Path:    orig.URL.RequestURI(),
@@ -640,9 +697,8 @@ func (n *clusterNode) forwardViaFrame(ctx context.Context, conn net.Conn, orig *
 		Hop:     hop,
 		Egress:  orig.Header.Get(clusterHdrEgress),
 		BodyLen: int64(len(body)),
-	}
-	if fh.Headers == nil {
-		fh.Headers = map[string]string{}
+		Stream:  isStream,
+		Headers: map[string]string{},
 	}
 	for k, vv := range orig.Header {
 		switch strings.ToLower(k) {
@@ -650,10 +706,10 @@ func (n *clusterNode) forwardViaFrame(ctx context.Context, conn net.Conn, orig *
 			continue
 		}
 		if len(vv) > 0 {
-			fh.Headers[k] = vv[0]
+			wf.Headers[k] = vv[0]
 		}
 	}
-	frame, _ := json.Marshal(fh)
+	frame, _ := json.Marshal(wf)
 	var lb [4]byte
 	binary.BigEndian.PutUint32(lb[:], uint32(len(frame)))
 	mu.Lock()
@@ -678,6 +734,55 @@ func (n *clusterNode) forwardViaFrame(ctx context.Context, conn net.Conn, orig *
 		if pr.err != nil {
 			return nil, pr.err
 		}
+		if isStream && pr.rf.Header != nil {
+			if ct, ok := pr.rf.Header["Content-Type"]; ok {
+				for _, v := range ct {
+					if strings.Contains(v, "event-stream") {
+						pr2 := <-streamCh
+						_ = pr2
+						hdr := http.Header{}
+						for k, vv := range pr.rf.Header {
+							for _, v := range vv {
+								hdr.Add(k, v)
+							}
+						}
+						pr2 = <-ch
+						if pr2.err != nil {
+							return nil, pr2.err
+						}
+						return buildStreamResponse(pr.rf, streamCh), nil
+					}
+				}
+			}
+		}
+		if isStream && streamCh != nil {
+			select {
+			case first := <-streamCh:
+				if first.isChunk {
+					hdr := http.Header{}
+					for k, vv := range pr.rf.Header {
+						for _, v := range vv {
+							hdr.Add(k, v)
+						}
+					}
+					return buildStreamResponse(pr.rf, streamChWithFirst(streamCh, first)), nil
+				}
+				if first.done {
+					hdr := http.Header{}
+					for k, vv := range pr.rf.Header {
+						for _, v := range vv {
+							hdr.Add(k, v)
+						}
+					}
+					var respBody []byte
+					if pr.rf.BodyLen > 0 {
+						respBody = pr.body
+					}
+					return &http.Response{StatusCode: pr.rf.StatusCode, Header: hdr, Body: io.NopCloser(bytes.NewReader(respBody))}, nil
+				}
+			default:
+			}
+		}
 		var respBody []byte
 		if pr.rf.BodyLen > 0 {
 			respBody = pr.body
@@ -701,7 +806,52 @@ func (n *clusterNode) deliverPending(id string, status *int, hdr map[string][]st
 	if pe.ch == nil {
 		return
 	}
-	pe.ch <- pendingResp{rf: clusterRespFrame{ID: id, StatusCode: *status, Header: hdr, BodyLen: int64(len(body))}, body: body}
+	select {
+	case pe.ch <- pendingResp{rf: clusterRespFrame{ID: id, StatusCode: *status, Header: hdr, BodyLen: int64(len(body))}, body: body}:
+	default:
+	}
+}
+
+func (n *clusterNode) deliverChunk(id string, chunk []byte, done bool, status *int, hdr map[string][]string) {
+	n.pendingMu.Lock()
+	pe := n.pending[id]
+	n.pendingMu.Unlock()
+	if pe.streamCh == nil {
+		if done {
+			select {
+			case pe.ch <- pendingResp{done: true}:
+			default:
+			}
+		} else if chunk != nil {
+			select {
+			case pe.streamCh <- pendingResp{chunk: chunk, isChunk: true}:
+			default:
+			}
+		}
+		return
+	}
+	if status != nil {
+		select {
+		case pe.ch <- pendingResp{rf: clusterRespFrame{ID: id, StatusCode: *status, Header: hdr}}:
+		default:
+		}
+		return
+	}
+	if done {
+		select {
+		case pe.streamCh <- pendingResp{done: true}:
+		default:
+		}
+		select {
+		case pe.ch <- pendingResp{done: true}:
+		default:
+		}
+		return
+	}
+	select {
+	case pe.streamCh <- pendingResp{chunk: chunk, isChunk: true}:
+	default:
+	}
 }
 
 func (n *clusterNode) failPending(c net.Conn) {
@@ -714,10 +864,92 @@ func (n *clusterNode) failPending(c net.Conn) {
 		case pe.ch <- pendingResp{err: fmt.Errorf("集群隧道连接已关闭")}:
 		default:
 		}
+		if pe.streamCh != nil {
+			select {
+			case pe.streamCh <- pendingResp{err: fmt.Errorf("集群隧道连接已关闭")}:
+			default:
+			}
+		}
 		delete(n.pending, id)
 	}
 	n.pendingMu.Unlock()
 }
+
+func buildStreamResponse(rf clusterRespFrame, ch chan pendingResp) *http.Response {
+	hdr := http.Header{}
+	for k, vv := range rf.Header {
+		for _, v := range vv {
+			hdr.Add(k, v)
+		}
+	}
+	pr, pw := io.Pipe()
+	go func() {
+		for item := range ch {
+			if item.err != nil {
+				_ = pw.CloseWithError(item.err)
+				return
+			}
+			if item.done {
+				_ = pw.Close()
+				return
+			}
+			if item.isChunk && len(item.chunk) > 0 {
+				if _, err := pw.Write(item.chunk); err != nil {
+					return
+				}
+			}
+		}
+		_ = pw.Close()
+	}()
+	return &http.Response{StatusCode: rf.StatusCode, Header: hdr, Body: pr}
+}
+
+func streamChWithFirst(ch chan pendingResp, first pendingResp) chan pendingResp {
+	out := make(chan pendingResp, 64)
+	out <- first
+	go func() {
+		for v := range ch {
+			out <- v
+		}
+		close(out)
+	}()
+	return out
+}
+
+func writeFrame(c net.Conn, wf clusterWireFrame, body []byte) error {
+	b, _ := json.Marshal(wf)
+	var lb [4]byte
+	binary.BigEndian.PutUint32(lb[:], uint32(len(b)))
+	if _, err := c.Write(lb[:]); err != nil {
+		return err
+	}
+	if _, err := c.Write(b); err != nil {
+		return err
+	}
+	if len(body) > 0 {
+		if _, err := c.Write(body); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func cloneHeaderMap(h http.Header) map[string][]string {
+	m := make(map[string][]string, len(h))
+	for k, vv := range h {
+		cp := make([]string, len(vv))
+		copy(cp, vv)
+		m[k] = cp
+	}
+	return m
+}
+
+func isSSEHeader(h http.Header) bool {
+	ct := h.Get("Content-Type")
+	return strings.Contains(ct, "text/event-stream") || strings.Contains(ct, "event-stream")
+}
+
+func intPtr(v int) *int { return &v }
 
 func isClusterInternalPath(p string) bool {
 	switch p {
