@@ -64,7 +64,7 @@ worker() {
     mapfile -t args < <(build_args)
     echo "=== worker 启动: 端口=$PORT backend=$BACKEND egress-prefer=$EGRESS_PREFER ==="
     log "worker 启动: 端口=$PORT backend=$BACKEND egress-prefer=$EGRESS_PREFER cache=$CACHE_FILE session-map=$SESSION_FILE cluster=$CLUSTER_LISTEN/$CLUSTER_JOIN"
-    "$BIN" "$PORT" "$BACKEND" "${args[@]}" --session-file "$SESSION_FILE" >> "$LOG_FILE" 2>&1
+    "$BIN" "$PORT" "$BACKEND" "${args[@]}" >> "$LOG_FILE" 2>&1
 }
 
 is_running() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
@@ -96,9 +96,16 @@ kill_old() {
 
 start() {
     kill_old "$PIDFILE"
-    setsid nohup "$SELF" run >/dev/null 2>&1 &
-    echo $! > "$PIDFILE"
-    echo "已启动 (pid $(cat "$PIDFILE"))  端口 $PORT  单口双栈 6→4 (失败标30s不可用, 双栈失败再集群)"
+    nohup "$SELF" run >/dev/null 2>&1 &
+    local child_pid=$!
+    echo "$child_pid" > "$PIDFILE"
+    sleep 2
+    if kill -0 "$child_pid" 2>/dev/null; then
+        echo "已启动 (pid $child_pid)  端口 $PORT  单口双栈 6→4 (失败标30s不可用, 双栈失败再集群)"
+    else
+        echo "启动失败，检查日志: $LOG_FILE"
+        exit 1
+    fi
     echo "后端: $BACKEND  egress-prefer=$EGRESS_PREFER  cache=$CACHE_FILE  日志=$LOG_FILE"
     if [ -n "$CLUSTER_LISTEN" ] || [ -n "$CLUSTER_JOIN" ] || [ -n "$PEERS" ]; then
         echo "集群: listen=$CLUSTER_LISTEN join=$CLUSTER_JOIN peers=$PEERS"

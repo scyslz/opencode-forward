@@ -106,6 +106,7 @@ type connWriter struct {
 	conn net.Conn
 	ch   chan []byte
 	done chan struct{}
+	mu   sync.Mutex
 }
 
 type clusterNode struct {
@@ -299,9 +300,12 @@ func (n *clusterNode) getWriter(c net.Conn) *connWriter {
 	}
 	go func() {
 		for b := range cw.ch {
+			cw.mu.Lock()
 			if _, err := c.Write(b); err != nil {
+				cw.mu.Unlock()
 				return
 			}
+			cw.mu.Unlock()
 		}
 		close(cw.done)
 	}()
@@ -480,6 +484,30 @@ func (n *clusterNode) handleConn(c net.Conn, tunnelID string) {
 		_ = tcp.SetKeepAlive(true)
 		_ = tcp.SetKeepAlivePeriod(n.keepAlive)
 	}
+	// 定期发送 ping 保持连接活跃（有活跃请求时跳过）
+	go func() {
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			n.pendingMu.Lock()
+			active := false
+			for _, pe := range n.pending {
+				if pe.conn == c {
+					active = true
+					break
+				}
+			}
+			n.pendingMu.Unlock()
+			if active {
+				log.Printf("[cluster] skip ping: %d in-flight", len(n.pending))
+				continue
+			}
+			if err := n.writeConn(c, pingFrame()); err != nil {
+				log.Printf("[cluster] ping failed: %v", err)
+				break
+			}
+		}
+	}()
 	reader := bufio.NewReader(c)
 	for {
 		_ = c.SetReadDeadline(time.Now().Add(2 * n.keepAlive))
@@ -1098,4 +1126,18 @@ func handleClusterHTTP(w http.ResponseWriter, r *http.Request, node *clusterNode
 		return true
 	}
 	return false
+}
+
+func pingFrame() []byte {
+	wf := clusterWireFrame{
+		ID:   "ping-" + randomHex(4),
+		Path: clusterPingPath,
+	}
+	b, _ := json.Marshal(wf)
+	var lb [4]byte
+	binary.BigEndian.PutUint32(lb[:], uint32(len(b)))
+	out := make([]byte, 0, 4+len(b))
+	out = append(out, lb[:]...)
+	out = append(out, b...)
+	return out
 }
