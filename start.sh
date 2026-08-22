@@ -24,6 +24,7 @@ LOG_FILE="$LOG_DIR/opencode-zen-proxy.log"
 PIDFILE="${PIDFILE:-$DIR/opencode-zen-proxy.pid}"
 CACHE_FILE="${CACHE_FILE:-$LOG_DIR/session-cache.json}"
 TUNNEL_FILE="${TUNNEL_FILE:-$LOG_DIR/tunnels.json}"
+SESSION_FILE="${SESSION_FILE:-$LOG_DIR/session-map.json}"
 DUMP="${DUMP:-0}"
 USER_AGENT="${USER_AGENT:-opencode/1.15.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13}"
 X_OPENCODE_CLIENT="${X_OPENCODE_CLIENT:-cli}"
@@ -62,8 +63,8 @@ worker() {
     local -a args=()
     mapfile -t args < <(build_args)
     echo "=== worker 启动: 端口=$PORT backend=$BACKEND egress-prefer=$EGRESS_PREFER ==="
-    log "worker 启动: 端口=$PORT backend=$BACKEND egress-prefer=$EGRESS_PREFER cache=$CACHE_FILE cluster=$CLUSTER_LISTEN/$CLUSTER_JOIN"
-    "$BIN" "$PORT" "$BACKEND" "${args[@]}" >> "$LOG_FILE" 2>&1
+    log "worker 启动: 端口=$PORT backend=$BACKEND egress-prefer=$EGRESS_PREFER cache=$CACHE_FILE session-map=$SESSION_FILE cluster=$CLUSTER_LISTEN/$CLUSTER_JOIN"
+    "$BIN" "$PORT" "$BACKEND" "${args[@]}" --session-file "$SESSION_FILE" >> "$LOG_FILE" 2>&1
 }
 
 is_running() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
