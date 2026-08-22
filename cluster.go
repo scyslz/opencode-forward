@@ -102,6 +102,12 @@ type clusterWireFrame struct {
 	Stream     bool                 `json:"stream,omitempty"`
 }
 
+type connWriter struct {
+	conn net.Conn
+	ch   chan []byte
+	done chan struct{}
+}
+
 type clusterNode struct {
 	cfg      clusterConfig
 	selfID   string
@@ -113,7 +119,7 @@ type clusterNode struct {
 	tlsCfg   *tls.Config
 	peerConns    sync.Map
 	inboundConns sync.Map
-	connLocks    sync.Map
+	connWriters  sync.Map
 	pendingMu    sync.Mutex
 	pending      map[string]pendingEntry
 	onForward func(r *http.Request) (*http.Response, error)
@@ -281,6 +287,64 @@ func setTCPKeepAlive(c net.Conn, d time.Duration) {
 	}
 }
 
+func (n *clusterNode) getWriter(c net.Conn) *connWriter {
+	key := fmt.Sprintf("%p", c)
+	if v, ok := n.connWriters.Load(key); ok {
+		return v.(*connWriter)
+	}
+	cw := &connWriter{conn: c, ch: make(chan []byte, 256), done: make(chan struct{})}
+	actual, loaded := n.connWriters.LoadOrStore(key, cw)
+	if loaded {
+		return actual.(*connWriter)
+	}
+	go func() {
+		for b := range cw.ch {
+			if _, err := c.Write(b); err != nil {
+				return
+			}
+		}
+		close(cw.done)
+	}()
+	return cw
+}
+
+func (n *clusterNode) removeWriter(c net.Conn) {
+	key := fmt.Sprintf("%p", c)
+	if v, ok := n.connWriters.Load(key); ok {
+		cw := v.(*connWriter)
+		n.connWriters.Delete(key)
+		close(cw.ch)
+	}
+}
+
+func (n *clusterNode) writeConn(c net.Conn, data []byte) error {
+	cw := n.getWriter(c)
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	select {
+	case cw.ch <- cp:
+		return nil
+	default:
+		select {
+		case cw.ch <- cp:
+			return nil
+		case <-time.After(5 * time.Second):
+			return fmt.Errorf("conn write queue full")
+		}
+	}
+}
+
+func packFrame(wf clusterWireFrame, body []byte) []byte {
+	b, _ := json.Marshal(wf)
+	var lb [4]byte
+	binary.BigEndian.PutUint32(lb[:], uint32(len(b)))
+	out := make([]byte, 0, 4+len(b)+len(body))
+	out = append(out, lb[:]...)
+	out = append(out, b...)
+	out = append(out, body...)
+	return out
+}
+
 func (n *clusterNode) loopPeerTunnel(addr string) {
 	for {
 		c, err := tls.Dial("tcp", addr, n.tlsCfg)
@@ -407,6 +471,7 @@ func (n *clusterNode) probeLoop() {
 
 func (n *clusterNode) handleConn(c net.Conn, tunnelID string) {
 	defer c.Close()
+	defer n.removeWriter(c)
 	if tunnelID != "" {
 		defer n.tunnels.close(tunnelID)
 	}
@@ -471,12 +536,11 @@ func (n *clusterNode) handleConn(c net.Conn, tunnelID string) {
 				rfb, _ := json.Marshal(rf)
 				var rlb [4]byte
 				binary.BigEndian.PutUint32(rlb[:], uint32(len(rfb)))
-				mu := n.connLock(c)
-				mu.Lock()
-				_, _ = c.Write(rlb[:])
-				_, _ = c.Write(rfb)
-				_, _ = c.Write(respBody)
-				mu.Unlock()
+				packed := make([]byte, 0, 4+len(rfb)+len(respBody))
+				packed = append(packed, rlb[:]...)
+				packed = append(packed, rfb...)
+				packed = append(packed, respBody...)
+				_ = n.writeConn(c, packed)
 			}
 			continue
 		}
@@ -529,26 +593,19 @@ func (n *clusterNode) handleConn(c net.Conn, tunnelID string) {
 		}
 		if wf.Stream && resp != nil && ferr == nil && resp.StatusCode == 200 && isSSEHeader(resp.Header) {
 			hdrs := cloneHeaderMap(resp.Header)
-			mu := n.connLock(c)
-			mu.Lock()
 			initFrame := clusterWireFrame{ID: h.ID, StatusCode: intPtr(200), Header: hdrs, IsChunk: false, Stream: true}
-			if err := writeFrame(c, initFrame, nil); err != nil {
-				mu.Unlock()
+			if err := n.writeConn(c, packFrame(initFrame, nil)); err != nil {
 				resp.Body.Close()
 				return
 			}
-			mu.Unlock()
 			buf := make([]byte, 4096)
 			for {
 				nbytes, rerr := resp.Body.Read(buf)
 				if nbytes > 0 {
 					chunk := make([]byte, nbytes)
 					copy(chunk, buf[:nbytes])
-					mu.Lock()
 					cf := clusterWireFrame{ID: h.ID, IsChunk: true, Chunk: chunk}
-					werr := writeFrame(c, cf, nil)
-					mu.Unlock()
-					if werr != nil {
+					if werr := n.writeConn(c, packFrame(cf, nil)); werr != nil {
 						break
 					}
 				}
@@ -557,10 +614,8 @@ func (n *clusterNode) handleConn(c net.Conn, tunnelID string) {
 				}
 			}
 			resp.Body.Close()
-			mu.Lock()
 			doneFrame := clusterWireFrame{ID: h.ID, Done: true}
-			_ = writeFrame(c, doneFrame, nil)
-			mu.Unlock()
+			_ = n.writeConn(c, packFrame(doneFrame, nil))
 			continue
 		}
 		var respBody []byte
@@ -595,28 +650,19 @@ func (n *clusterNode) handleConn(c net.Conn, tunnelID string) {
 		rfb, _ := json.Marshal(rf)
 		var rlb [4]byte
 		binary.BigEndian.PutUint32(rlb[:], uint32(len(rfb)))
-		mu := n.connLock(c)
-		mu.Lock()
-		if _, err := c.Write(rlb[:]); err != nil {
-			mu.Unlock()
-			return
-		}
-		if _, err := c.Write(rfb); err != nil {
-			mu.Unlock()
-			return
-		}
+		var bodyOut []byte
 		if ferr != nil {
-			if _, err := c.Write([]byte(ferr.Error())); err != nil {
-				mu.Unlock()
-				return
-			}
-		} else if respBody != nil {
-			if _, err := c.Write(respBody); err != nil {
-				mu.Unlock()
-				return
-			}
+			bodyOut = []byte(ferr.Error())
+		} else {
+			bodyOut = respBody
 		}
-		mu.Unlock()
+		packed := make([]byte, 0, 4+len(rfb)+len(bodyOut))
+		packed = append(packed, rlb[:]...)
+		packed = append(packed, rfb...)
+		packed = append(packed, bodyOut...)
+		if err := n.writeConn(c, packed); err != nil {
+			return
+		}
 	}
 }
 
@@ -662,17 +708,9 @@ func (n *clusterNode) ForwardToPeer(ctx context.Context, peer *clusterPeer, orig
 	return nil, fmt.Errorf("no tls tunnel to peer %s", peer.Addr)
 }
 
-func (n *clusterNode) connLock(c net.Conn) *sync.Mutex {
-	if c == nil {
-		return &sync.Mutex{}
-	}
-	key := fmt.Sprintf("%p", c)
-	v, _ := n.connLocks.LoadOrStore(key, &sync.Mutex{})
-	return v.(*sync.Mutex)
-}
+func (n *clusterNode) connLock(c net.Conn) *sync.Mutex { return &sync.Mutex{} }
 
 func (n *clusterNode) forwardViaFrame(ctx context.Context, conn net.Conn, orig *http.Request, body []byte, visited []string, hop int) (*http.Response, error) {
-	mu := n.connLock(conn)
 	reqID := "r-" + randomHex(8)
 	isStream := bytes.Contains(bytes.ToLower(body), []byte(`"stream":true`)) || bytes.Contains(body, []byte(`"stream": true`))
 	ch := make(chan pendingResp, 1)
@@ -712,22 +750,13 @@ func (n *clusterNode) forwardViaFrame(ctx context.Context, conn net.Conn, orig *
 	frame, _ := json.Marshal(wf)
 	var lb [4]byte
 	binary.BigEndian.PutUint32(lb[:], uint32(len(frame)))
-	mu.Lock()
-	if _, err := conn.Write(lb[:]); err != nil {
-		mu.Unlock()
+	packed := make([]byte, 0, 4+len(frame)+len(body))
+	packed = append(packed, lb[:]...)
+	packed = append(packed, frame...)
+	packed = append(packed, body...)
+	if err := n.writeConn(conn, packed); err != nil {
 		return nil, err
 	}
-	if _, err := conn.Write(frame); err != nil {
-		mu.Unlock()
-		return nil, err
-	}
-	if len(body) > 0 {
-		if _, err := conn.Write(body); err != nil {
-			mu.Unlock()
-			return nil, err
-		}
-	}
-	mu.Unlock()
 
 	select {
 	case pr := <-ch:

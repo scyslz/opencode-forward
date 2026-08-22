@@ -396,7 +396,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if shouldFail {
 				p.egress.markUnavailable(fam, false)
 				lastResp = resp
+				b, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
+				lastResp.Body = io.NopCloser(bytes.NewReader(b))
+				hdr := lastResp.Header
+				_ = hdr
+				log.Printf("[failover] 本地 IPv%s 返回 %d 可 failover, 尝试对端转发", fam, resp.StatusCode)
 				continue
 			}
 			p.egress.markAvailable(fam)
@@ -428,7 +433,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			shouldFail := p.cluster != nil && p.cluster.ShouldFailover(resp.StatusCode, false)
 			if shouldFail {
 				lastResp = resp
+				b, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
+				lastResp.Body = io.NopCloser(bytes.NewReader(b))
+				log.Printf("[failover] 备用 IPv%s 亦 %d 可 failover", fam, resp.StatusCode)
 				continue
 			}
 			p.egress.markAvailable(fam)
@@ -486,23 +494,32 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if p.cluster != nil && p.cluster.Enabled() {
 		peers := p.cluster.PickPeers(visitedMap)
+		if len(peers) == 0 && lastResp != nil {
+			log.Printf("[failover] 本地 %d 已 failover 但无可用 peer, 将原样返回 %d", lastResp.StatusCode, lastResp.StatusCode)
+		}
 		for _, peer := range peers {
 			if hop+1 > maxHop {
 				break
 			}
+			log.Printf("[failover] 尝试对端 %s (hop %d)", peer.Addr, hop+1)
 			peerCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 			cloneReq := &http.Request{Method: r.Method, URL: r.URL, Header: r.Header.Clone()}
 			resp, err := p.cluster.ForwardToPeer(peerCtx, peer, cloneReq, body, visited, hop+1)
 			cancel()
 			if err != nil {
+				log.Printf("[failover] 对端 %s 失败: %v", peer.Addr, err)
 				lastErr = err
 				continue
 			}
 			if p.cluster.ShouldFailover(resp.StatusCode, false) {
+				log.Printf("[failover] 对端 %s 亦 %d", peer.Addr, resp.StatusCode)
 				lastResp = resp
+				b, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
+				lastResp.Body = io.NopCloser(bytes.NewReader(b))
 				continue
 			}
+			log.Printf("[failover] 对端 %s 成功 %d", peer.Addr, resp.StatusCode)
 			defer resp.Body.Close()
 			for k, vv := range resp.Header {
 				for _, v := range vv {
