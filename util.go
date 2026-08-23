@@ -5,9 +5,88 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net/url"
+	"os"
 	"strings"
+	"sync"
+	"time"
 )
+
+var (
+	logLevel   = 1
+	logLevelMu sync.Mutex
+	throttleMu sync.Mutex
+	throttleAt = map[string]time.Time{}
+)
+
+func init() {
+	lv := strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL")))
+	switch lv {
+	case "debug":
+		logLevel = 0
+	case "info", "":
+		logLevel = 1
+	case "warn":
+		logLevel = 2
+	case "error":
+		logLevel = 3
+	}
+	if os.Getenv("VERBOSE") == "1" {
+		logLevel = 0
+	}
+}
+
+func setLogLevel(s string) {
+	logLevelMu.Lock()
+	defer logLevelMu.Unlock()
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		logLevel = 0
+	case "info":
+		logLevel = 1
+	case "warn":
+		logLevel = 2
+	case "error":
+		logLevel = 3
+	}
+}
+
+func logDebugf(format string, args ...any) {
+	if logLevel > 0 {
+		return
+	}
+	log.Printf(format, args...)
+}
+
+func logInfof(format string, args ...any) {
+	if logLevel > 1 {
+		return
+	}
+	log.Printf(format, args...)
+}
+
+func logWarnf(format string, args ...any) {
+	if logLevel > 2 {
+		return
+	}
+	log.Printf(format, args...)
+}
+
+func logThrottledf(key string, interval time.Duration, format string, args ...any) {
+	if logLevel > 0 {
+		throttleMu.Lock()
+		last, ok := throttleAt[key]
+		now := time.Now()
+		if ok && now.Sub(last) < interval {
+			throttleMu.Unlock()
+			return
+		}
+		throttleAt[key] = now
+		throttleMu.Unlock()
+	}
+	log.Printf(format, args...)
+}
 
 const base62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 

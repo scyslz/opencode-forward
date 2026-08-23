@@ -30,10 +30,39 @@ USER_AGENT="${USER_AGENT:-opencode/1.15.0 ai-sdk/provider-utils/4.0.23 runtime/b
 X_OPENCODE_CLIENT="${X_OPENCODE_CLIENT:-cli}"
 X_OPENCODE_PROJECT="${X_OPENCODE_PROJECT:-global}"
 
+VERBOSE="${VERBOSE:-0}"
+LOG_MAX_MB="${LOG_MAX_MB:-20}"
+LOG_MAX_FILES="${LOG_MAX_FILES:-5}"
+LOG_LEVEL="${LOG_LEVEL:-info}"
+LEVEL_NUM() { case "${1:-info}" in debug) echo 0;; info) echo 1;; warn) echo 2;; error) echo 3;; *) echo 1;; esac; }
+CURRENT_LEVEL="$(LEVEL_NUM "$LOG_LEVEL")"
 log() { echo "[$(date '+%F %T')] $*" >> "$LOG_FILE"; }
+rotate_logs() {
+    [ -f "$LOG_FILE" ] || return 0
+    local sz; sz=$(stat -c%s "$LOG_FILE" 2>/dev/null || stat -f%z "$LOG_FILE" 2>/dev/null || echo 0)
+    local max=$(( LOG_MAX_MB * 1024 * 1024 ))
+    if [ "$sz" -gt "$max" ]; then
+        for i in $(seq $((LOG_MAX_FILES-1)) -1 1); do [ -f "$LOG_FILE.$i" ] && mv -f "$LOG_FILE.$i" "$LOG_FILE.$((i+1))"; done
+        mv -f "$LOG_FILE" "$LOG_FILE.1"
+        : > "$LOG_FILE"
+        echo "[$(date '+%F %T')] 日志轮转: 已归档 $LOG_FILE.1 (阈值 ${LOG_MAX_MB}MB, 保留 ${LOG_MAX_FILES} 份)" >> "$LOG_FILE"
+    fi
+}
+trim_args_for_log() {
+    local out="" tok
+    for tok in "$@"; do
+        case "$tok" in
+            --cluster-token|--outbound-auth|--inbound-auth) out+=" $tok ****" ;;
+            *) case "$tok" in *" "*|*"'"*|*'"'*) out+=" '$tok'" ;; *) out+=" $tok" ;; esac ;;
+        esac
+    done
+    echo "$out"
+}
 
 build_args() {
-    local -a a=(--verbose --cache-file "$CACHE_FILE" --egress-prefer "$EGRESS_PREFER" --tunnel-file "$TUNNEL_FILE")
+    local -a a=(--cache-file "$CACHE_FILE" --egress-prefer "$EGRESS_PREFER" --tunnel-file "$TUNNEL_FILE")
+    [ "$VERBOSE" = "1" ] && a+=(--verbose)
+    [ "$LOG_LEVEL" != "info" ] && a+=(--log-level "$LOG_LEVEL")
     [ -n "$OUTBOUND_AUTH" ] && a+=(--outbound-auth "$OUTBOUND_AUTH")
     [ -n "$INBOUND_AUTH" ] && a+=(--inbound-auth "$INBOUND_AUTH")
     [ "$FWD_INBOUND" = "1" ] && a+=(-F)
@@ -60,10 +89,12 @@ build_args() {
 
 worker() {
     mkdir -p "$LOG_DIR"
+    rotate_logs
     local -a args=()
     mapfile -t args < <(build_args)
-    echo "=== worker 启动: 端口=$PORT backend=$BACKEND egress-prefer=$EGRESS_PREFER ==="
-    log "worker 启动: 端口=$PORT backend=$BACKEND egress-prefer=$EGRESS_PREFER cache=$CACHE_FILE session-map=$SESSION_FILE cluster=$CLUSTER_LISTEN/$CLUSTER_JOIN"
+    local safe_args; safe_args=$(trim_args_for_log "${args[@]}")
+    echo "[$(date '+%F %T')] worker 启动: $BIN $PORT $BACKEND $safe_args" >> "$LOG_FILE"
+    log "worker 启动: 端口=$PORT backend=$BACKEND egress-prefer=$EGRESS_PREFER cache=$CACHE_FILE session-map=$SESSION_FILE cluster=$CLUSTER_LISTEN/$CLUSTER_JOIN level=$LOG_LEVEL verbose=$VERBOSE rotate=${LOG_MAX_MB}MBx${LOG_MAX_FILES}"
     "$BIN" "$PORT" "$BACKEND" "${args[@]}" >> "$LOG_FILE" 2>&1
 }
 
@@ -101,7 +132,8 @@ start() {
     echo "$child_pid" > "$PIDFILE"
     sleep 2
     if kill -0 "$child_pid" 2>/dev/null; then
-        echo "已启动 (pid $child_pid)  端口 $PORT  单口双栈 6→4 (失败标30s不可用, 双栈失败再集群)"
+        if [ "$VERBOSE" = "1" ]; then echo "已启动 (pid $child_pid)  VERBOSE=1 日志详细 (含每请求/集群重试)  级别=$LOG_LEVEL"; else echo "已启动 (pid $child_pid)  日志精简 (级别=$LOG_LEVEL, 详尽需 VERBOSE=1)"; fi
+        echo "端口 $PORT  单口双栈 6→4 (失败标30s不可用, 双栈失败再集群)"
     else
         echo "启动失败，检查日志: $LOG_FILE"
         exit 1
@@ -110,8 +142,9 @@ start() {
     if [ -n "$CLUSTER_LISTEN" ] || [ -n "$CLUSTER_JOIN" ] || [ -n "$PEERS" ]; then
         echo "集群: listen=$CLUSTER_LISTEN join=$CLUSTER_JOIN peers=$PEERS"
     else
-        echo "集群: 未启用 (设 CLUSTER_LISTEN/CLUSTER_JOIN/PEERS 启用)"
+        echo "集群: 未启用 (可用 CLUSTER_LISTEN/CLUSTER_JOIN/PEERS 启用, 详尽日志 VERBOSE=1 LOG_LEVEL=debug)"
     fi
+    echo "日志轮转: ${LOG_MAX_MB}MB x ${LOG_MAX_FILES}  最大约 $((LOG_MAX_MB * LOG_MAX_FILES))MB"
 }
 
 stop() {

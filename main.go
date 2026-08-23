@@ -46,7 +46,8 @@ func usage() {
   --cache-file <path> 持久化为嵌套 JSON {nsKey:{..}}
 
 选项:
-  --verbose            打印每条请求日志
+  --verbose            打印每条请求日志 (等价 --log-level debug)
+  --log-level <lv>     日志级别 debug/info/warn/error (默认 info; 集群重试/ping仅debug)
   --dump               打印完整转发请求特征: 全部 header + body
   --outbound-auth <token>  转发给后端 Authorization: Bearer <token>
   --inbound-auth <token>   客户端访问本服务需带 Authorization: Bearer <token>
@@ -99,6 +100,7 @@ func main() {
 	dump := false
 	xff := false
 	genRequest := false
+	logLevelArg := ""
 	authToken := ""
 	inboundAuth := ""
 	fwdInbound := false
@@ -125,6 +127,12 @@ func main() {
 			xff = true
 		case arg == "--gen-request":
 			genRequest = true
+		case arg == "--log-level":
+			if i+1 < len(extraArgs) {
+				i++
+				logLevelArg = extraArgs[i]
+				setLogLevel(logLevelArg)
+			}
 		case arg == "--egress-prefer" || arg == "--prefer":
 			if i+1 < len(extraArgs) {
 				i++
@@ -260,6 +268,12 @@ func main() {
 	}
 	log.Printf("  出口: %s (X-Egress可覆盖)", egressDesc)
 	log.Printf("  特征头: User-Agent=%s client=%s project=%s outbound-auth=%s", defaultUserAgent, defaultClient, defaultProject, authSummary(authToken))
+	if verbose {
+		setLogLevel("debug")
+	}
+	if logLevelArg != "" {
+		setLogLevel(logLevelArg)
+	}
 	if fwdInbound && inboundAuth != "" {
 		log.Printf("  入站校验: 开启 (客户端需 Authorization: Bearer %s); 转发使用同一 token (-F)", inboundAuth)
 	} else if inboundAuth != "" {

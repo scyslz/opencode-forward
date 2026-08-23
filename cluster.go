@@ -382,7 +382,7 @@ func (n *clusterNode) loopPeerTunnel(p *clusterPeer) {
 			c, err = tls.Dial("tcp", p.Addr, n.tlsCfg)
 			if err == nil {
 				if err = n.handshake(c, false); err != nil {
-					log.Printf("[cluster] TCP 握手 peer %s 失败: %v", p.Addr, err)
+					logThrottledf(p.Addr+"-tcp-handshake", 30*time.Second, "[cluster] TCP 握手 peer %s 失败: %v", p.Addr, err)
 					_ = c.Close()
 					time.Sleep(3 * time.Second)
 					continue
@@ -391,14 +391,14 @@ func (n *clusterNode) loopPeerTunnel(p *clusterPeer) {
 		}
 
 		if err != nil {
-			log.Printf("[cluster] 拨号 peer %s 失败: %v, 3s重试", p.Addr, err)
+			logThrottledf(p.Addr+"-dial", 30*time.Second, "[cluster] 拨号 peer %s 失败: %v, 3s重试", p.Addr, err)
 			time.Sleep(3 * time.Second)
 			continue
 		}
 
 		setTCPKeepAlive(c, n.keepAlive)
 		n.peerConns.Store(p.ID, c)
-		log.Printf("[cluster] peer %s 隧道已建立 (keepalive=%s)", p.Addr, n.keepAlive)
+		logDebugf("[cluster] peer %s 隧道已建立 (keepalive=%s)", p.Addr, n.keepAlive)
 		isWS := strings.HasPrefix(p.Addr, "wss://") || strings.HasPrefix(p.Addr, "ws://")
 		tid := "out-" + randomHex(4)
 		n.tunnels.open(tid, "outbound", "", p.Addr, c.LocalAddr().String())
@@ -449,13 +449,13 @@ func (n *clusterNode) acceptLoop() {
 				}
 				ws, err := wsUpgrader.Upgrade(&fakeResponseWriter{conn: c, br: br}, req, nil)
 				if err != nil {
-					log.Printf("[cluster] WS 升级失败: %v", err)
+					logDebugf("[cluster] WS 升级失败: %v", err)
 					c.Close()
 					return
 				}
 				conn := &wsConnWrapper{conn: ws}
 				if err := n.verifyHandshake(conn, true); err != nil {
-					log.Printf("[cluster] WSS 握手被拒: %v", err)
+					logDebugf("[cluster] WSS 握手被拒: %v", err)
 					_ = conn.Close()
 					return
 				}
@@ -472,7 +472,7 @@ func (n *clusterNode) acceptLoop() {
 			delete(n.peers, conn.RemoteAddr().String())
 			n.mu.Unlock()
 			n.inboundConns.Delete(conn.RemoteAddr().String())
-			log.Printf("[cluster] 隧道下线剔除: %s", conn.RemoteAddr())
+			logDebugf("[cluster] 隧道下线剔除: %s", conn.RemoteAddr())
 		})
 	}
 }
@@ -713,14 +713,13 @@ func (n *clusterNode) joinLoop() {
 		}
 
 		if err != nil {
-			log.Printf("[cluster] Join %s 失败: %v, 3s重试", n.cfg.JoinAddr, err)
+			logThrottledf(n.cfg.JoinAddr+"-join", 30*time.Second, "[cluster] Join %s 失败: %v, 3s重试", n.cfg.JoinAddr, err)
 			time.Sleep(3 * time.Second)
 			continue
 		}
 
-		log.Printf("[cluster] 节点 %s 与 %s 握手成功", n.selfID, n.cfg.JoinAddr)
-		setTCPKeepAlive(c, n.keepAlive)
 		log.Printf("[cluster] 节点 %s 已加入 %s (keepalive=%s)", n.selfID, n.cfg.JoinAddr, n.keepAlive)
+		setTCPKeepAlive(c, n.keepAlive)
 		n.joinMu.Lock()
 		n.joinConn = c
 		n.joinMu.Unlock()
@@ -729,7 +728,7 @@ func (n *clusterNode) joinLoop() {
 		n.tunnels.open(tid, "outbound", "", n.cfg.JoinAddr, c.LocalAddr().String())
 		n.handleConn(c, isWS, tid)
 		n.tunnels.close(tid)
-		log.Printf("[cluster] 节点 %s 与 %s 的连接已断开, 3s后重连", n.selfID, n.cfg.JoinAddr)
+		logDebugf("[cluster] 节点 %s 与 %s 的连接已断开, 3s后重连", n.selfID, n.cfg.JoinAddr)
 		n.joinMu.Lock()
 		n.joinConn = nil
 		n.joinMu.Unlock()
@@ -765,15 +764,15 @@ func (n *clusterNode) probeLoop() {
 						resp.Body.Close()
 					}
 					if err != nil {
-						log.Printf("[cluster] ping peer %s fail (tunnel): %v", p.Addr, err)
+						logDebugf("[cluster] ping peer %s fail (tunnel): %v", p.Addr, err)
 					} else {
-						log.Printf("[cluster] ping peer %s status=%d (tunnel)", p.Addr, resp.StatusCode)
+						logDebugf("[cluster] ping peer %s status=%d (tunnel)", p.Addr, resp.StatusCode)
 					}
 					n.mu.Unlock()
 					continue
 				}
 				resp.Body.Close()
-				log.Printf("[cluster] ping peer %s ok rtt=%dms (tunnel)", p.Addr, rtt)
+				logDebugf("[cluster] ping peer %s ok rtt=%dms (tunnel)", p.Addr, rtt)
 			}
 			n.mu.Unlock()
 		}
