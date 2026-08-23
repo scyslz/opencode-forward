@@ -84,10 +84,11 @@ type pendingResp struct {
 }
 
 type pendingEntry struct {
-	ch   chan pendingResp
-	conn net.Conn
-	streamCh chan pendingResp
-	isStream bool
+	ch        chan pendingResp
+	conn      net.Conn
+	streamCh  chan pendingResp
+	isStream  bool
+	overflow  int
 }
 
 type clusterWireFrame struct {
@@ -127,7 +128,7 @@ type clusterNode struct {
 	inboundConns sync.Map
 	connWriters  sync.Map
 	pendingMu    sync.Mutex
-	pending      map[string]pendingEntry
+	pending      map[string]*pendingEntry
 	onForward func(r *http.Request) (*http.Response, error)
 	keepAlive time.Duration
 	tunnels   *tunnelStore
@@ -229,7 +230,7 @@ func newClusterNode(cfg clusterConfig) *clusterNode {
 		peers:   map[string]*clusterPeer{},
 		tlsCfg:  tlsCfg,
 		tunnels: newTunnelStore(cfg.TunnelFile),
-		pending: map[string]pendingEntry{},
+		pending: map[string]*pendingEntry{},
 	}
 }
 
@@ -902,7 +903,7 @@ func (n *clusterNode) forwardViaFrame(ctx context.Context, conn net.Conn, orig *
 		streamCh = make(chan pendingResp, 64)
 	}
 	n.pendingMu.Lock()
-	n.pending[reqID] = pendingEntry{ch: ch, conn: conn, streamCh: streamCh, isStream: isStream}
+	n.pending[reqID] = &pendingEntry{ch: ch, conn: conn, streamCh: streamCh, isStream: isStream}
 	n.pendingMu.Unlock()
 	defer func() {
 		n.pendingMu.Lock()
@@ -1050,6 +1051,18 @@ func (n *clusterNode) deliverChunk(id string, chunk []byte, done bool, status *i
 		return
 	}
 	if done {
+		if pe.overflow > 0 {
+			errMsg := fmt.Errorf("集群流被截断: 消费侧拥塞, 丢弃 %d 个数据块", pe.overflow)
+			select {
+			case pe.streamCh <- pendingResp{err: errMsg}:
+			default:
+			}
+			select {
+			case pe.ch <- pendingResp{err: errMsg}:
+			default:
+			}
+			return
+		}
 		select {
 		case pe.streamCh <- pendingResp{done: true}:
 		default:
@@ -1063,6 +1076,7 @@ func (n *clusterNode) deliverChunk(id string, chunk []byte, done bool, status *i
 	select {
 	case pe.streamCh <- pendingResp{chunk: chunk, isChunk: true}:
 	default:
+		pe.overflow++
 	}
 }
 
