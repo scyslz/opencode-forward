@@ -407,7 +407,11 @@ func (n *clusterNode) dialWSS(addr string) (net.Conn, error) {
 	dialer := websocket.Dialer{
 		TLSClientConfig: n.tlsCfg,
 	}
-	ws, _, err := dialer.Dial(addr, nil)
+	headers := http.Header{}
+	if n.cfg.Token != "" {
+		headers.Set(clusterHdrToken, n.cfg.Token)
+	}
+	ws, _, err := dialer.Dial(addr, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -431,6 +435,16 @@ func (n *clusterNode) acceptLoop() {
 		if len(peek) >= 3 && string(peek[:3]) == "GET" {
 			go func(c net.Conn, br *bufio.Reader) {
 				req, _ := http.ReadRequest(br)
+				if req == nil {
+					c.Close()
+					return
+				}
+				if n.cfg.Token != "" && !secureCompare(req.Header.Get(clusterHdrToken), n.cfg.Token) {
+					log.Printf("[cluster] 匿名 WSS 连接被拒绝 token 不匹配 (from %s)", req.Header.Get("X-Forwarded-For"))
+					_ = fakeWriteForbidden(c, req)
+					c.Close()
+					return
+				}
 				ws, err := wsUpgrader.Upgrade(&fakeResponseWriter{conn: c, br: br}, req, nil)
 				if err != nil {
 					log.Printf("[cluster] WS 升级失败: %v", err)
@@ -522,6 +536,12 @@ func (f *fakeResponseWriter) Write(b []byte) (int, error) {
 func (f *fakeResponseWriter) WriteHeader(statusCode int) {}
 func (f *fakeResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return f.conn, bufio.NewReadWriter(f.br, bufio.NewWriter(f.conn)), nil
+}
+
+func fakeWriteForbidden(c net.Conn, _ *http.Request) error {
+	resp := "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\nContent-Length: 12\r\nConnection: close\r\n\r\nunauthorized"
+	_, err := c.Write([]byte(resp))
+	return err
 }
 
 func (n *clusterNode) joinLoop() {
