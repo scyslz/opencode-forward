@@ -41,7 +41,7 @@ build_args() {
     [ -n "$CLUSTER_LISTEN" ] && a+=(--cluster-listen "$CLUSTER_LISTEN")
     [ -n "$CLUSTER_JOIN" ] && a+=(--cluster-join "$CLUSTER_JOIN")
     if [ -n "$PEERS" ]; then
-        IFS=',' read -ra __peers <<< "$PEERS"
+        IFS=';' read -ra __peers <<< "$PEERS"
         for p in "${__peers[@]}"; do
             p="$(echo "$p" | xargs)"
             [ -n "$p" ] && a+=(--peer "$p")
