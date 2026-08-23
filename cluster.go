@@ -482,7 +482,11 @@ func (n *clusterNode) acceptLoop() {
 func (n *clusterNode) handleRawConn(c net.Conn, onDone func(net.Conn, string)) {
 	remote := c.RemoteAddr().String()
 	local := c.LocalAddr().String()
-	if tlsConn, ok := c.(*tls.Conn); ok {
+	underlying := c
+	if tcw, ok := c.(*tcpConnWrapper); ok {
+		underlying = tcw.Conn
+	}
+	if tlsConn, ok := underlying.(*tls.Conn); ok {
 		if hErr := tlsConn.Handshake(); hErr != nil {
 			log.Printf("[cluster] 接受连接 TLS握手失败: %v", hErr)
 			_ = c.Close()
