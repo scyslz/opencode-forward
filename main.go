@@ -251,7 +251,7 @@ func main() {
 	}
 
 	log.Printf("opencode-zen-proxy 启动 (version %s):", version)
-	log.Printf("  监听: %s (单口双栈 6→4, 失败标记%s不可用, 双栈失败再集群)", ln.Addr(), unavailableCool)
+	log.Printf("  监听: %s (单端口同时接受 IPv4/IPv6)", ln.Addr())
 	log.Printf("  后端: %s//%s  基础路径: %s", scheme, host, basePath)
 	var egressDesc string
 	switch egressPrefer {
@@ -260,13 +260,18 @@ func main() {
 	case "d6":
 		egressDesc = "强制 IPv6 (无回退)"
 	case "4":
-		egressDesc = "优先 IPv4 (4→6)"
+		egressDesc = "优先 IPv4, 失败回退 IPv6"
 	case "6":
-		egressDesc = "优先 IPv6 (6→4)"
+		egressDesc = "优先 IPv6, 失败回退 IPv4"
 	case "auto":
-		egressDesc = "并发竞速(auto HappyEyeballs)"
+		egressDesc = "并发竞速 HappyEyeballs (IPv4/IPv6 并发, 快者胜)"
 	}
-	log.Printf("  出口: %s (X-Egress可覆盖)", egressDesc)
+	log.Printf("  出口策略: %s (X-Egress 头可覆盖) | 失败冷却 %s | 探测间隔 %s", egressDesc, unavailableCool, probeInterval)
+	if clusterCfg.JoinAddr != "" || clusterCfg.ListenAddr != "" || len(clusterCfg.Peers) > 0 {
+		log.Printf("  集群兜底: 双栈均失败时转发至对端 (join=%s listen=%s)", clusterCfg.JoinAddr, clusterCfg.ListenAddr)
+	} else {
+		log.Printf("  集群兜底: 未启用 (双栈均失败则直接返回错误, 可用 --cluster-join/--cluster-listen 启用)")
+	}
 	log.Printf("  特征头: User-Agent=%s client=%s project=%s outbound-auth=%s", defaultUserAgent, defaultClient, defaultProject, authSummary(authToken))
 	if verbose {
 		setLogLevel("debug")

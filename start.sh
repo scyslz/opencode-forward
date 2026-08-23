@@ -125,6 +125,16 @@ kill_old() {
     kill_by_port "$PORT"
 }
 
+egress_human() {
+    case "$EGRESS_PREFER" in
+        d4) echo "强制 IPv4" ;;
+        d6) echo "强制 IPv6" ;;
+        4)  echo "优先 IPv4,失败回退IPv6" ;;
+        6)  echo "优先 IPv6,失败回退IPv4" ;;
+        auto) echo "并发竞速" ;;
+        *) echo "$EGRESS_PREFER" ;;
+    esac
+}
 start() {
     kill_old "$PIDFILE"
     nohup "$SELF" run >/dev/null 2>&1 &
@@ -132,19 +142,14 @@ start() {
     echo "$child_pid" > "$PIDFILE"
     sleep 2
     if kill -0 "$child_pid" 2>/dev/null; then
-        if [ "$VERBOSE" = "1" ]; then echo "已启动 (pid $child_pid)  VERBOSE=1 日志详细 (含每请求/集群重试)  级别=$LOG_LEVEL"; else echo "已启动 (pid $child_pid)  日志精简 (级别=$LOG_LEVEL, 详尽需 VERBOSE=1)"; fi
-        echo "端口 $PORT  单口双栈 6→4 (失败标30s不可用, 双栈失败再集群)"
+        if [ "$VERBOSE" = "1" ]; then echo "已启动 (pid $child_pid)  日志 VERBOSE=1/debug (含每请求)"; else echo "已启动 (pid $child_pid)  日志 $LOG_LEVEL 精简"; fi
+        echo "监听 :$PORT 单端口双栈  后端 $BACKEND"
+        echo "出口 $(egress_human)  冷却 30s  探测 $IP_INTERVAL  集群 ${CLUSTER_JOIN:-${CLUSTER_LISTEN:-未启用}}"
     else
         echo "启动失败，检查日志: $LOG_FILE"
         exit 1
     fi
-    echo "后端: $BACKEND  egress-prefer=$EGRESS_PREFER  cache=$CACHE_FILE  日志=$LOG_FILE"
-    if [ -n "$CLUSTER_LISTEN" ] || [ -n "$CLUSTER_JOIN" ] || [ -n "$PEERS" ]; then
-        echo "集群: listen=$CLUSTER_LISTEN join=$CLUSTER_JOIN peers=$PEERS"
-    else
-        echo "集群: 未启用 (可用 CLUSTER_LISTEN/CLUSTER_JOIN/PEERS 启用, 详尽日志 VERBOSE=1 LOG_LEVEL=debug)"
-    fi
-    echo "日志轮转: ${LOG_MAX_MB}MB x ${LOG_MAX_FILES}  最大约 $((LOG_MAX_MB * LOG_MAX_FILES))MB"
+    echo "日志 $LOG_FILE  轮转 ${LOG_MAX_MB}MBx${LOG_MAX_FILES}"
 }
 
 stop() {
