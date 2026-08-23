@@ -106,6 +106,7 @@ type clusterWireFrame struct {
 	Chunk      []byte               `json:"chunk,omitempty"`
 	Done       bool                 `json:"done,omitempty"`
 	Stream     bool                 `json:"stream,omitempty"`
+	AuthToken  string               `json:"auth_token,omitempty"`
 }
 
 type connWriter struct {
@@ -381,6 +382,14 @@ func (n *clusterNode) loopPeerTunnel(p *clusterPeer) {
 			c, err = n.dialWSS(p.Addr)
 		} else {
 			c, err = tls.Dial("tcp", p.Addr, n.tlsCfg)
+			if err == nil && n.cfg.Token != "" {
+				if err = n.handshakeTCP(c); err != nil {
+					log.Printf("[cluster] TCP 握手 peer %s 失败: %v", p.Addr, err)
+					_ = c.Close()
+					time.Sleep(3 * time.Second)
+					continue
+				}
+			}
 		}
 
 		if err != nil {
@@ -480,6 +489,11 @@ func (n *clusterNode) handleRawConn(c net.Conn, onDone func(net.Conn, string)) {
 			return
 		}
 	}
+	if err := n.verifyHandshakeTCP(c); err != nil {
+		log.Printf("[cluster] 匿名裸TCP 连接被拒绝: %v (from %s)", err, remote)
+		_ = c.Close()
+		return
+	}
 	tid := "in-" + randomHex(4)
 	n.tunnels.open(tid, "inbound", "", remote, local)
 	log.Printf("[cluster] 接受隧道连接: id=%s remote=%s local=%s (服务端日志)", tid, remote, local)
@@ -524,6 +538,87 @@ type tcpConnWrapper struct {
 
 func (t *tcpConnWrapper) Read(b []byte) (int, error) { return t.Reader.Read(b) }
 
+func (n *clusterNode) handshakeTCP(c net.Conn) error {
+	frame := clusterWireFrame{AuthToken: n.cfg.Token}
+	b, _ := json.Marshal(frame)
+	var lb [4]byte
+	binary.BigEndian.PutUint32(lb[:], uint32(len(b)))
+	if err := c.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	if _, err := c.Write(lb[:]); err != nil {
+		return err
+	}
+	if _, err := c.Write(b); err != nil {
+		return err
+	}
+	_ = c.SetWriteDeadline(time.Time{})
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var l int32
+	if err := binary.Read(c, binary.BigEndian, &l); err != nil {
+		return err
+	}
+	if l <= 0 || l > 1<<10 {
+		return fmt.Errorf("握手响应长度非法")
+	}
+	rb := make([]byte, l)
+	if _, err := io.ReadFull(c, rb); err != nil {
+		return err
+	}
+	_ = c.SetReadDeadline(time.Time{})
+	var resp clusterWireFrame
+	if err := json.Unmarshal(rb, &resp); err != nil {
+		return err
+	}
+	if resp.AuthToken != "ok" {
+		return fmt.Errorf("握手被拒: %s", resp.AuthToken)
+	}
+	return nil
+}
+
+func (n *clusterNode) verifyHandshakeTCP(c net.Conn) error {
+	if n.cfg.Token == "" {
+		return nil
+	}
+	_ = c.SetReadDeadline(time.Now().Add(8 * time.Second))
+	var l int32
+	if err := binary.Read(c, binary.BigEndian, &l); err != nil {
+		return err
+	}
+	if l <= 0 || l > 1<<10 {
+		return fmt.Errorf("握手长度非法")
+	}
+	rb := make([]byte, l)
+	if _, err := io.ReadFull(c, rb); err != nil {
+		return err
+	}
+	var wf clusterWireFrame
+	if err := json.Unmarshal(rb, &wf); err != nil {
+		return err
+	}
+	if !secureCompare(wf.AuthToken, n.cfg.Token) {
+		fail := clusterWireFrame{AuthToken: "unauthorized"}
+		_ = n.writeConnHandshake(c, fail)
+		return fmt.Errorf("token 不匹配")
+	}
+	ok := clusterWireFrame{AuthToken: "ok"}
+	if err := n.writeConnHandshake(c, ok); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (n *clusterNode) writeConnHandshake(c net.Conn, wf clusterWireFrame) error {
+	b, _ := json.Marshal(wf)
+	var lb [4]byte
+	binary.BigEndian.PutUint32(lb[:], uint32(len(b)))
+	_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_, err := c.Write(append(lb[:], b...))
+	_ = c.SetWriteDeadline(time.Time{})
+	_ = c.SetReadDeadline(time.Time{})
+	return err
+}
+
 type fakeResponseWriter struct {
 	conn net.Conn
 	br   *bufio.Reader
@@ -554,12 +649,16 @@ func (n *clusterNode) joinLoop() {
 			c, err = n.dialWSS(n.cfg.JoinAddr)
 		} else {
 			tc, tcpErr := tls.Dial("tcp", cleanAddr(n.cfg.JoinAddr), n.tlsCfg)
-			if tcpErr == nil {
-				c = net.Conn(tc)
-			} else if n.cfg.JoinWSSAddr != "" {
-				log.Printf("[cluster] TCP Join %s 失败: %v，尝试 WSS: %s", n.cfg.JoinAddr, tcpErr, n.cfg.JoinWSSAddr)
-				c, err = n.dialWSS(n.cfg.JoinWSSAddr)
+			if tcpErr == nil && n.cfg.Token != "" {
+				if err = n.handshakeTCP(tc); err != nil {
+					log.Printf("[cluster] TCP Join %s 握手失败: %v", n.cfg.JoinAddr, err)
+					_ = tc.Close()
+					tcpErr = err
+				} else {
+					c = tc
+				}
 			} else {
+				c = tc
 				err = tcpErr
 			}
 		}
