@@ -26,9 +26,7 @@ import (
 )
 
 const (
-	clusterForwardPath = "/_cluster/forward"
 	clusterPingPath    = "/_cluster/ping"
-	clusterPeerUpdatePath = "/_cluster/peer_update"
 	maxHop             = 3
 	clusterHdrVisited  = "X-Cluster-Visited"
 	clusterHdrHop      = "X-Cluster-Hop"
@@ -1331,7 +1329,7 @@ func intPtr(v int) *int { return &v }
 
 func isClusterInternalPath(p string) bool {
 	switch p {
-	case clusterForwardPath, clusterPingPath, "/_cluster/peers":
+	case clusterPingPath, "/_cluster/peers":
 		return true
 	}
 	return false
@@ -1371,83 +1369,6 @@ func handleClusterHTTP(w http.ResponseWriter, r *http.Request, node *clusterNode
 		node.mu.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(list)
-		return true
-	case clusterForwardPath:
-		if node.cfg.Token != "" && !secureCompare(r.Header.Get(clusterHdrToken), node.cfg.Token) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return true
-		}
-		if node == nil || node.onForward == nil {
-			http.Error(w, "cluster not enabled", http.StatusNotImplemented)
-			return true
-		}
-		visitedStr := r.Header.Get(clusterHdrVisited)
-		var visited []string
-		if visitedStr != "" {
-			visited = strings.Split(visitedStr, ",")
-		}
-		for _, v := range visited {
-			if strings.TrimSpace(v) == node.selfID {
-				http.Error(w, "loop detected", http.StatusLoopDetected)
-				return true
-			}
-		}
-		hop := 0
-		fmt.Sscanf(r.Header.Get(clusterHdrHop), "%d", &hop)
-		if hop > maxHop {
-			http.Error(w, "max hop exceeded", http.StatusLoopDetected)
-			return true
-		}
-		var body []byte
-		if r.Body != nil {
-			body, _ = io.ReadAll(r.Body)
-		}
-		fwdMethod := r.Header.Get("X-Forwarded-Method")
-		fwdURI := r.Header.Get("X-Forwarded-Uri")
-		if fwdMethod == "" {
-			fwdMethod = http.MethodGet
-		}
-		u, _ := url.Parse(fwdURI)
-		if u == nil || u.Path == "" {
-			u = &url.URL{Path: "/"}
-		}
-		fwdReq := &http.Request{Method: fwdMethod, URL: u, Header: http.Header{}}
-		for k, vv := range r.Header {
-			lk := strings.ToLower(k)
-			if strings.HasPrefix(lk, "x-forwarded-") || lk == strings.ToLower(clusterHdrVisited) || lk == strings.ToLower(clusterHdrHop) || lk == strings.ToLower(clusterHdrToken) || lk == strings.ToLower(clusterHdrEgress) {
-				continue
-			}
-			for _, v := range vv {
-				fwdReq.Header.Add(k, v)
-			}
-		}
-		fwdReq.Header.Set(clusterHdrVisited, strings.Join(visited, ","))
-		fwdReq.Header.Set(clusterHdrHop, fmt.Sprintf("%d", hop))
-		fwdReq.Header.Set(clusterHdrToken, node.cfg.Token)
-		fwdReq.Header.Set(clusterHdrEgress, r.Header.Get(clusterHdrEgress))
-		fwdReq.Header.Set("X-Forwarded-Method", "")
-		fwdReq.Header.Set("X-Forwarded-Uri", "")
-		if len(body) > 0 {
-			fwdReq.Body = io.NopCloser(bytes.NewReader(body))
-			fwdReq.ContentLength = int64(len(body))
-		}
-		if node.onForward == nil {
-			http.Error(w, "cluster not enabled", http.StatusNotImplemented)
-			return true
-		}
-		resp, err := node.onForward(fwdReq)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return true
-		}
-		defer resp.Body.Close()
-		for k, vv := range resp.Header {
-			for _, v := range vv {
-				w.Header().Add(k, v)
-			}
-		}
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
 		return true
 	}
 	return false
