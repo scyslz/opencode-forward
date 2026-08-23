@@ -502,10 +502,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			log.Printf("[failover] 尝试对端 %s (hop %d)", peer.Addr, hop+1)
-			peerCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+			peerCtx := r.Context()
+			var cancel context.CancelFunc
+			if !isStreamRequest(body) {
+				peerCtx, cancel = context.WithTimeout(r.Context(), 30*time.Second)
+			}
 			cloneReq := &http.Request{Method: r.Method, URL: r.URL, Header: r.Header.Clone()}
 			resp, err := p.cluster.ForwardToPeer(peerCtx, peer, cloneReq, body, visited, hop+1)
-			cancel()
+			if cancel != nil {
+				cancel()
+			}
 			if err != nil {
 				log.Printf("[failover] 对端 %s 失败: %v", peer.Addr, err)
 				lastErr = err

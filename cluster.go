@@ -892,8 +892,6 @@ func (n *clusterNode) ForwardToPeer(ctx context.Context, peer *clusterPeer, orig
 	return nil, fmt.Errorf("no tls tunnel to peer %s", peer.Addr)
 }
 
-func (n *clusterNode) connLock(c net.Conn) *sync.Mutex { return &sync.Mutex{} }
-
 func (n *clusterNode) forwardViaFrame(ctx context.Context, conn net.Conn, orig *http.Request, body []byte, visited []string, hop int) (*http.Response, error) {
 	reqID := "r-" + randomHex(8)
 	isStream := bytes.Contains(bytes.ToLower(body), []byte(`"stream":true`)) || bytes.Contains(body, []byte(`"stream": true`))
@@ -905,11 +903,11 @@ func (n *clusterNode) forwardViaFrame(ctx context.Context, conn net.Conn, orig *
 	n.pendingMu.Lock()
 	n.pending[reqID] = &pendingEntry{ch: ch, conn: conn, streamCh: streamCh, isStream: isStream}
 	n.pendingMu.Unlock()
-	defer func() {
+	cleanupPending := func() {
 		n.pendingMu.Lock()
 		delete(n.pending, reqID)
 		n.pendingMu.Unlock()
-	}()
+	}
 
 	wf := clusterWireFrame{
 		ID:      reqID,
@@ -939,31 +937,35 @@ func (n *clusterNode) forwardViaFrame(ctx context.Context, conn net.Conn, orig *
 	packed = append(packed, frame...)
 	packed = append(packed, body...)
 	if err := n.writeConn(conn, packed); err != nil {
+		cleanupPending()
 		return nil, err
 	}
 
 	select {
 	case pr := <-ch:
 		if pr.err != nil {
+			cleanupPending()
 			return nil, pr.err
 		}
 		if isStream && pr.rf.Header != nil {
 			if ct, ok := pr.rf.Header["Content-Type"]; ok {
 				for _, v := range ct {
 					if strings.Contains(v, "event-stream") {
-						pr2 := <-streamCh
-						_ = pr2
-						hdr := http.Header{}
-						for k, vv := range pr.rf.Header {
-							for _, v := range vv {
-								hdr.Add(k, v)
+						select {
+						case first := <-streamCh:
+							if first.err != nil {
+								cleanupPending()
+								return nil, first.err
 							}
+							if first.done {
+								cleanupPending()
+								return buildStaticResponse(pr), nil
+							}
+							return buildStreamResponse(pr.rf, streamCh, &first, cleanupPending), nil
+						case <-ctx.Done():
+							cleanupPending()
+							return nil, ctx.Err()
 						}
-						pr2 = <-ch
-						if pr2.err != nil {
-							return nil, pr2.err
-						}
-						return buildStreamResponse(pr.rf, streamCh), nil
 					}
 				}
 			}
@@ -972,51 +974,42 @@ func (n *clusterNode) forwardViaFrame(ctx context.Context, conn net.Conn, orig *
 			select {
 			case first := <-streamCh:
 				if first.isChunk {
-					hdr := http.Header{}
-					for k, vv := range pr.rf.Header {
-						for _, v := range vv {
-							hdr.Add(k, v)
-						}
-					}
-					return buildStreamResponse(pr.rf, streamChWithFirst(streamCh, first)), nil
+					return buildStreamResponse(pr.rf, streamCh, &first, cleanupPending), nil
 				}
 				if first.done {
-					hdr := http.Header{}
-					for k, vv := range pr.rf.Header {
-						for _, v := range vv {
-							hdr.Add(k, v)
-						}
-					}
-					var respBody []byte
-					if pr.rf.BodyLen > 0 {
-						respBody = pr.body
-					}
-					return &http.Response{StatusCode: pr.rf.StatusCode, Header: hdr, Body: io.NopCloser(bytes.NewReader(respBody))}, nil
+					cleanupPending()
+					return buildStaticResponse(pr), nil
 				}
 			default:
 			}
 		}
-		var respBody []byte
-		if pr.rf.BodyLen > 0 {
-			respBody = pr.body
-		}
-		hdr := http.Header{}
-		for k, vv := range pr.rf.Header {
-			for _, v := range vv {
-				hdr.Add(k, v)
-			}
-		}
-		return &http.Response{StatusCode: pr.rf.StatusCode, Header: hdr, Body: io.NopCloser(bytes.NewReader(respBody))}, nil
+		cleanupPending()
+		return buildStaticResponse(pr), nil
 	case <-ctx.Done():
+		cleanupPending()
 		return nil, ctx.Err()
 	}
+}
+
+func buildStaticResponse(pr pendingResp) *http.Response {
+	hdr := http.Header{}
+	for k, vv := range pr.rf.Header {
+		for _, v := range vv {
+			hdr.Add(k, v)
+		}
+	}
+	var respBody []byte
+	if pr.rf.BodyLen > 0 {
+		respBody = pr.body
+	}
+	return &http.Response{StatusCode: pr.rf.StatusCode, Header: hdr, Body: io.NopCloser(bytes.NewReader(respBody))}
 }
 
 func (n *clusterNode) deliverPending(id string, status *int, hdr map[string][]string, body []byte) {
 	n.pendingMu.Lock()
 	pe := n.pending[id]
 	n.pendingMu.Unlock()
-	if pe.ch == nil {
+	if pe == nil || pe.ch == nil {
 		return
 	}
 	select {
@@ -1029,6 +1022,9 @@ func (n *clusterNode) deliverChunk(id string, chunk []byte, done bool, status *i
 	n.pendingMu.Lock()
 	pe := n.pending[id]
 	n.pendingMu.Unlock()
+	if pe == nil {
+		return
+	}
 	if pe.streamCh == nil {
 		if done {
 			select {
@@ -1101,7 +1097,7 @@ func (n *clusterNode) failPending(c net.Conn) {
 	n.pendingMu.Unlock()
 }
 
-func buildStreamResponse(rf clusterRespFrame, ch chan pendingResp) *http.Response {
+func buildStreamResponse(rf clusterRespFrame, ch chan pendingResp, first *pendingResp, onDone func()) *http.Response {
 	hdr := http.Header{}
 	for k, vv := range rf.Header {
 		for _, v := range vv {
@@ -1110,54 +1106,40 @@ func buildStreamResponse(rf clusterRespFrame, ch chan pendingResp) *http.Respons
 	}
 	pr, pw := io.Pipe()
 	go func() {
-		for item := range ch {
+		defer func() {
+			if onDone != nil {
+				onDone()
+			}
+		}()
+		writeItem := func(item pendingResp) bool {
 			if item.err != nil {
 				_ = pw.CloseWithError(item.err)
-				return
+				return false
 			}
 			if item.done {
 				_ = pw.Close()
-				return
+				return false
 			}
 			if item.isChunk && len(item.chunk) > 0 {
 				if _, err := pw.Write(item.chunk); err != nil {
-					return
+					return false
 				}
+			}
+			return true
+		}
+		if first != nil {
+			if !writeItem(*first) {
+				return
+			}
+		}
+		for item := range ch {
+			if !writeItem(item) {
+				return
 			}
 		}
 		_ = pw.Close()
 	}()
 	return &http.Response{StatusCode: rf.StatusCode, Header: hdr, Body: pr}
-}
-
-func streamChWithFirst(ch chan pendingResp, first pendingResp) chan pendingResp {
-	out := make(chan pendingResp, 64)
-	out <- first
-	go func() {
-		for v := range ch {
-			out <- v
-		}
-		close(out)
-	}()
-	return out
-}
-
-func writeFrame(c net.Conn, wf clusterWireFrame, body []byte) error {
-	b, _ := json.Marshal(wf)
-	var lb [4]byte
-	binary.BigEndian.PutUint32(lb[:], uint32(len(b)))
-	if _, err := c.Write(lb[:]); err != nil {
-		return err
-	}
-	if _, err := c.Write(b); err != nil {
-		return err
-	}
-	if len(body) > 0 {
-		if _, err := c.Write(body); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func cloneHeaderMap(h http.Header) map[string][]string {
