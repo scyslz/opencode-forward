@@ -382,8 +382,8 @@ func (n *clusterNode) loopPeerTunnel(p *clusterPeer) {
 			c, err = n.dialWSS(p.Addr)
 		} else {
 			c, err = tls.Dial("tcp", p.Addr, n.tlsCfg)
-			if err == nil && n.cfg.Token != "" {
-				if err = n.handshakeTCP(c); err != nil {
+			if err == nil {
+				if err = n.handshake(c, false); err != nil {
 					log.Printf("[cluster] TCP 握手 peer %s 失败: %v", p.Addr, err)
 					_ = c.Close()
 					time.Sleep(3 * time.Second)
@@ -416,18 +416,19 @@ func (n *clusterNode) dialWSS(addr string) (net.Conn, error) {
 	dialer := websocket.Dialer{
 		TLSClientConfig: n.tlsCfg,
 	}
-	headers := http.Header{}
-	if n.cfg.Token != "" {
-		headers.Set(clusterHdrToken, n.cfg.Token)
-	}
-	ws, _, err := dialer.Dial(addr, headers)
+	ws, _, err := dialer.Dial(addr, nil)
 	if err != nil {
 		return nil, err
 	}
-	return &wsConnWrapper{conn: ws}, nil
+	c := &wsConnWrapper{conn: ws}
+	if err := n.handshake(c, true); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+	return c, nil
 }
 
-var wsUpgrader = websocket.Upgrader{
+	var wsUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
@@ -448,12 +449,6 @@ func (n *clusterNode) acceptLoop() {
 					c.Close()
 					return
 				}
-				if n.cfg.Token != "" && !secureCompare(req.Header.Get(clusterHdrToken), n.cfg.Token) {
-					log.Printf("[cluster] 匿名 WSS 连接被拒绝 token 不匹配 (from %s)", req.Header.Get("X-Forwarded-For"))
-					_ = fakeWriteForbidden(c, req)
-					c.Close()
-					return
-				}
 				ws, err := wsUpgrader.Upgrade(&fakeResponseWriter{conn: c, br: br}, req, nil)
 				if err != nil {
 					log.Printf("[cluster] WS 升级失败: %v", err)
@@ -461,6 +456,11 @@ func (n *clusterNode) acceptLoop() {
 					return
 				}
 				conn := &wsConnWrapper{conn: ws}
+				if err := n.verifyHandshake(conn, true); err != nil {
+					log.Printf("[cluster] WSS 握手被拒: %v", err)
+					_ = conn.Close()
+					return
+				}
 				n.handleConn(conn, true, "ws-"+randomHex(4))
 			}(c, br)
 			continue
@@ -493,7 +493,7 @@ func (n *clusterNode) handleRawConn(c net.Conn, onDone func(net.Conn, string)) {
 			return
 		}
 	}
-	if err := n.verifyHandshakeTCP(c); err != nil {
+	if err := n.verifyHandshake(c, false); err != nil {
 		log.Printf("[cluster] 匿名裸TCP 连接被拒绝: %v (from %s)", err, remote)
 		_ = c.Close()
 		return
@@ -542,36 +542,62 @@ type tcpConnWrapper struct {
 
 func (t *tcpConnWrapper) Read(b []byte) (int, error) { return t.Reader.Read(b) }
 
-func (n *clusterNode) handshakeTCP(c net.Conn) error {
+func (n *clusterNode) handshake(c net.Conn, isWS bool) error {
 	frame := clusterWireFrame{AuthToken: n.cfg.Token}
 	b, _ := json.Marshal(frame)
 	var lb [4]byte
 	binary.BigEndian.PutUint32(lb[:], uint32(len(b)))
-	if err := c.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	framed := append(lb[:], b...)
+	var err error
+	if isWS {
+		err = c.(*wsConnWrapper).conn.WriteMessage(websocket.BinaryMessage, framed)
+		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if err == nil {
+			_, data, rerr := c.(*wsConnWrapper).conn.ReadMessage()
+			_ = c.SetReadDeadline(time.Time{})
+			if rerr != nil {
+				return rerr
+			}
+			if len(data) < 4 {
+				return fmt.Errorf("握手响应长度非法")
+			}
+			hl := binary.BigEndian.Uint32(data[:4])
+			if hl == 0 || hl > 1<<10 || int(hl)+4 > len(data) {
+				return fmt.Errorf("握手响应长度非法")
+			}
+			var resp clusterWireFrame
+			if err2 := json.Unmarshal(data[4:4+hl], &resp); err2 != nil {
+				return err2
+			}
+			if resp.AuthToken != "ok" {
+				return fmt.Errorf("握手被拒: %s", resp.AuthToken)
+			}
+			return nil
+		}
 		return err
 	}
-	if _, err := c.Write(lb[:]); err != nil {
+	if err = c.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return err
 	}
-	if _, err := c.Write(b); err != nil {
+	if _, err = c.Write(framed); err != nil {
 		return err
 	}
 	_ = c.SetWriteDeadline(time.Time{})
 	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
 	var l int32
-	if err := binary.Read(c, binary.BigEndian, &l); err != nil {
+	if err = binary.Read(c, binary.BigEndian, &l); err != nil {
 		return err
 	}
 	if l <= 0 || l > 1<<10 {
 		return fmt.Errorf("握手响应长度非法")
 	}
 	rb := make([]byte, l)
-	if _, err := io.ReadFull(c, rb); err != nil {
+	if _, err = io.ReadFull(c, rb); err != nil {
 		return err
 	}
 	_ = c.SetReadDeadline(time.Time{})
 	var resp clusterWireFrame
-	if err := json.Unmarshal(rb, &resp); err != nil {
+	if err = json.Unmarshal(rb, &resp); err != nil {
 		return err
 	}
 	if resp.AuthToken != "ok" {
@@ -580,9 +606,29 @@ func (n *clusterNode) handshakeTCP(c net.Conn) error {
 	return nil
 }
 
-func (n *clusterNode) verifyHandshakeTCP(c net.Conn) error {
-	if n.cfg.Token == "" {
-		return nil
+func (n *clusterNode) verifyHandshake(c net.Conn, isWS bool) error {
+	if isWS {
+		_ = c.SetReadDeadline(time.Now().Add(8 * time.Second))
+		_, data, err := c.(*wsConnWrapper).conn.ReadMessage()
+		if err != nil {
+			return err
+		}
+		if len(data) < 4 {
+			return fmt.Errorf("握手长度非法")
+		}
+		hl := binary.BigEndian.Uint32(data[:4])
+		if hl == 0 || hl > 1<<10 || int(hl)+4 > len(data) {
+			return fmt.Errorf("握手长度非法")
+		}
+		var wf clusterWireFrame
+		if err := json.Unmarshal(data[4:4+hl], &wf); err != nil {
+			return err
+		}
+		if !secureCompare(wf.AuthToken, n.cfg.Token) {
+			_ = n.writeHandshakeWS(c, clusterWireFrame{AuthToken: "unauthorized"})
+			return fmt.Errorf("token 不匹配")
+		}
+		return n.writeHandshakeWS(c, clusterWireFrame{AuthToken: "ok"})
 	}
 	_ = c.SetReadDeadline(time.Now().Add(8 * time.Second))
 	var l int32
@@ -602,17 +648,24 @@ func (n *clusterNode) verifyHandshakeTCP(c net.Conn) error {
 	}
 	if !secureCompare(wf.AuthToken, n.cfg.Token) {
 		fail := clusterWireFrame{AuthToken: "unauthorized"}
-		_ = n.writeConnHandshake(c, fail)
+		_ = n.writeHandshakeTCP(c, fail)
 		return fmt.Errorf("token 不匹配")
 	}
-	ok := clusterWireFrame{AuthToken: "ok"}
-	if err := n.writeConnHandshake(c, ok); err != nil {
-		return err
-	}
-	return nil
+	return n.writeHandshakeTCP(c, clusterWireFrame{AuthToken: "ok"})
 }
 
-func (n *clusterNode) writeConnHandshake(c net.Conn, wf clusterWireFrame) error {
+func (n *clusterNode) writeHandshakeWS(c net.Conn, wf clusterWireFrame) error {
+	b, _ := json.Marshal(wf)
+	var lb [4]byte
+	binary.BigEndian.PutUint32(lb[:], uint32(len(b)))
+	_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	err := c.(*wsConnWrapper).conn.WriteMessage(websocket.BinaryMessage, append(lb[:], b...))
+	_ = c.SetWriteDeadline(time.Time{})
+	_ = c.SetReadDeadline(time.Time{})
+	return err
+}
+
+func (n *clusterNode) writeHandshakeTCP(c net.Conn, wf clusterWireFrame) error {
 	b, _ := json.Marshal(wf)
 	var lb [4]byte
 	binary.BigEndian.PutUint32(lb[:], uint32(len(b)))
@@ -637,12 +690,6 @@ func (f *fakeResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return f.conn, bufio.NewReadWriter(f.br, bufio.NewWriter(f.conn)), nil
 }
 
-func fakeWriteForbidden(c net.Conn, _ *http.Request) error {
-	resp := "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\nContent-Length: 12\r\nConnection: close\r\n\r\nunauthorized"
-	_, err := c.Write([]byte(resp))
-	return err
-}
-
 func (n *clusterNode) joinLoop() {
 	for {
 		var c net.Conn
@@ -653,8 +700,8 @@ func (n *clusterNode) joinLoop() {
 			c, err = n.dialWSS(n.cfg.JoinAddr)
 		} else {
 			tc, tcpErr := tls.Dial("tcp", cleanAddr(n.cfg.JoinAddr), n.tlsCfg)
-			if tcpErr == nil && n.cfg.Token != "" {
-				if err = n.handshakeTCP(tc); err != nil {
+			if tcpErr == nil {
+				if err = n.handshake(tc, false); err != nil {
 					log.Printf("[cluster] TCP Join %s 握手失败: %v", n.cfg.JoinAddr, err)
 					_ = tc.Close()
 					tcpErr = err
