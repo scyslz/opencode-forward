@@ -436,6 +436,8 @@ func (n *clusterNode) acceptLoop() {
 		if err != nil {
 			return
 		}
+		remote := c.RemoteAddr().String()
+		log.Printf("[cluster] 收到入站连接: from=%s local=%s", remote, c.LocalAddr())
 
 		// 简单的 HTTP/WS 握手嗅探
 		br := bufio.NewReader(c)
@@ -449,13 +451,13 @@ func (n *clusterNode) acceptLoop() {
 				}
 				ws, err := wsUpgrader.Upgrade(&fakeResponseWriter{conn: c, br: br}, req, nil)
 				if err != nil {
-					logDebugf("[cluster] WS 升级失败: %v", err)
+					log.Printf("[cluster] WS 升级失败: from=%s err=%v", remote, err)
 					c.Close()
 					return
 				}
 				conn := &wsConnWrapper{conn: ws}
 				if err := n.verifyHandshake(conn, true); err != nil {
-					logDebugf("[cluster] WSS 握手被拒: %v", err)
+					log.Printf("[cluster] WSS 握手被拒: from=%s err=%v", remote, err)
 					_ = conn.Close()
 					return
 				}

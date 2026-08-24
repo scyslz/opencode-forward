@@ -105,7 +105,11 @@ is_running() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
 kill_by_port() {
     local port="$1"
     local pids=""
-    pids=$(ss -tlnp "sport = :$port" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u 2>/dev/null || true)
+    if command -v ss >/dev/null 2>&1; then
+        pids=$(ss -tlnp 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" {for(i=1;i<=NF;i++) if($i ~ /pid=/) {sub(/pid=/,"",$i); print $i}}' | sort -u)
+    elif command -v netstat >/dev/null 2>&1; then
+        pids=$(netstat -tlnp 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" {for(i=1;i<=NF;i++) if($i ~ /\//) {split($i,a,"/"); print a[1]}}' | sort -u)
+    fi
     if [ -n "$pids" ]; then
         for pid in $pids; do
             [ "$pid" = "$$" ] && continue
@@ -118,10 +122,12 @@ kill_by_port() {
 
 kill_old() {
     local pidfile="${1:-$PIDFILE}"
-    if is_running "$pidfile"; then
+    if [ -f "$pidfile" ]; then
         local pid; pid="$(cat "$pidfile")"
-        kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
-        for _ in $(seq 1 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+            for _ in $(seq 1 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+        fi
         rm -f "$pidfile"
     fi
     kill_by_port "$PORT"
