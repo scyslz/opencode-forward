@@ -18,6 +18,7 @@ PEERS="${PEERS:-}"
 FAILOVER_ON="${FAILOVER_ON:-}"
 IP_INTERVAL="${IP_INTERVAL:-5m}"
 IP_URL="${IP_URL:-}"
+DNS_SERVER="${DNS_SERVER:-}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 LOG_DIR="${LOG_DIR:-$DIR/logs}"
 LOG_FILE="$LOG_DIR/opencode-zen-proxy.log"
@@ -83,6 +84,7 @@ build_args() {
     [ "$DUMP" = "1" ] && a+=(--dump)
     a+=(--ip-interval "$IP_INTERVAL")
     [ -n "$IP_URL" ] && a+=(--ip-url "$IP_URL")
+    [ -n "$DNS_SERVER" ] && a+=(--dns-server "$DNS_SERVER")
     eval "a+=($EXTRA_ARGS)"
     printf '%s\n' "${a[@]}"
 }

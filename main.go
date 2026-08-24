@@ -108,6 +108,7 @@ func main() {
 	probeInterval := 5 * time.Minute
 	probeURL4 := ""
 	probeURL6 := ""
+	dnsServer := ""
 	var extraHeaders []string
 	var defaults = map[string]string{
 		"User-Agent":         defaultUserAgent,
@@ -149,10 +150,15 @@ func main() {
 				i++
 				dur, err := time.ParseDuration(extraArgs[i])
 				if err != nil || dur <= 0 {
-					fmt.Fprintln(os.Stderr, "错误: --ip-interval 需要合法时长, 如 5m")
+					fmt.Fprintf(os.Stderr, "错误: --ip-interval 需要合法时长, 如 5m")
 					os.Exit(1)
 				}
 				probeInterval = dur
+			}
+		case arg == "--dns-server":
+			if i+1 < len(extraArgs) {
+				i++
+				dnsServer = extraArgs[i]
 			}
 		case arg == "--ip-url":
 			if i+1 < len(extraArgs) {
@@ -200,7 +206,8 @@ func main() {
 		listenAddr = ":" + listenAddr
 	}
 
-	egress := newEgressManager(egressPrefer, probeURL4, probeURL6, probeInterval)
+	resolver := makeResolver(dnsServer)
+	egress := newEgressManager(egressPrefer, probeURL4, probeURL6, probeInterval, resolver)
 	sess := newSessionCache(cacheFile)
 	clusterNode := newClusterNode(clusterCfg)
 

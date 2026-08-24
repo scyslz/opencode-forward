@@ -12,6 +12,19 @@ import (
 	"time"
 )
 
+func makeResolver(dnsServer string) *net.Resolver {
+	if dnsServer == "" {
+		return net.DefaultResolver
+	}
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 5 * time.Second}
+			return d.DialContext(ctx, "udp", net.JoinHostPort(dnsServer, "53"))
+		},
+	}
+}
+
 const (
 	unavailableCool     = 30 * time.Second
 	maxUnavailableCool  = 10 * time.Minute
@@ -91,7 +104,11 @@ func (p *ipProbe) run() {
 		cur := p.current
 		p.mu.Unlock()
 		if fc > 0 {
-			d := unavailableCool * time.Duration(1<<uint(fc-1))
+			shift := fc - 1
+			if shift > 30 {
+				shift = 30
+			}
+			d := unavailableCool * time.Duration(1<<uint(shift))
 			if d > maxUnavailableCool {
 				d = maxUnavailableCool
 			}
@@ -104,7 +121,7 @@ func (p *ipProbe) run() {
 	}
 }
 
-func makeDialContext(mode string) func(ctx context.Context, network, addr string) (net.Conn, error) {
+func makeDialContext(mode string, resolver *net.Resolver) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	baseDialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
@@ -115,7 +132,7 @@ func makeDialContext(mode string) func(ctx context.Context, network, addr string
 		if ip := net.ParseIP(host); ip != nil {
 			ips = []net.IP{ip}
 		} else {
-			addrs, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+			addrs, err := resolver.LookupIP(ctx, "ip", host)
 			if err != nil {
 				return nil, fmt.Errorf("解析 %s 失败: %w", host, err)
 			}
@@ -153,10 +170,10 @@ type egressManager struct {
 	unavailMu   sync.Mutex
 }
 
-func newEgressManager(prefer string, probeURL4, probeURL6 string, interval time.Duration) *egressManager {
+func newEgressManager(prefer string, probeURL4, probeURL6 string, interval time.Duration, resolver *net.Resolver) *egressManager {
 	transports := map[string]*http.Transport{
-		"4": {DialContext: makeDialContext("4"), ForceAttemptHTTP2: true, MaxIdleConns: 100, MaxIdleConnsPerHost: 100, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second},
-		"6": {DialContext: makeDialContext("6"), ForceAttemptHTTP2: true, MaxIdleConns: 100, MaxIdleConnsPerHost: 100, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second},
+		"4": {DialContext: makeDialContext("4", resolver), ForceAttemptHTTP2: true, MaxIdleConns: 100, MaxIdleConnsPerHost: 100, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second},
+		"6": {DialContext: makeDialContext("6", resolver), ForceAttemptHTTP2: true, MaxIdleConns: 100, MaxIdleConnsPerHost: 100, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second},
 	}
 	if probeURL4 == "" {
 		probeURL4 = "https://api.ipify.org"
