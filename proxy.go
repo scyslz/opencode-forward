@@ -250,6 +250,26 @@ func (p *Proxy) SetCluster(c ClusterForwarder) {
 	}
 }
 
+func isHopByHop(k string) bool {
+	switch strings.ToLower(k) {
+	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "proxy-connection":
+		return true
+	}
+	return false
+}
+
+// passthroughHeader 白名单: 仅放行真实 opencode CLI 会发送的头, 其余客户端头一律不透传
+func passthroughHeader(k string) bool {
+	if isHopByHop(k) {
+		return false
+	}
+	switch strings.ToLower(k) {
+	case "accept", "content-type", "accept-encoding", "content-length":
+		return true
+	}
+	return false
+}
+
 func (p *Proxy) buildOutbound(in *http.Request, outSession string) *http.Request {
 	u := &url.URL{Scheme: p.cfg.scheme, Host: p.cfg.host, Path: joinPath(p.cfg.basePath, in.URL.Path), RawQuery: in.URL.RawQuery}
 	out := &http.Request{
@@ -260,6 +280,9 @@ func (p *Proxy) buildOutbound(in *http.Request, outSession string) *http.Request
 	}
 	for k, vv := range in.Header {
 		if strings.EqualFold(k, "X-Egress") || strings.EqualFold(k, clusterHdrVisited) || strings.EqualFold(k, clusterHdrHop) || strings.EqualFold(k, clusterHdrToken) {
+			continue
+		}
+		if !passthroughHeader(k) {
 			continue
 		}
 		for _, v := range vv {
