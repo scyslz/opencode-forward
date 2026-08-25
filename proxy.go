@@ -139,7 +139,7 @@ func isEmptySSE(data []byte) bool {
 
 func dumpRequest(r *http.Request) {
 	var b strings.Builder
-	b.WriteString("\n----- opencode 请求特征 -----\n")
+	b.WriteString("\n----- 入站原始请求 -----\n")
 	fmt.Fprintf(&b, "%s %s HTTP/%d.%d\n", r.Method, r.URL.RequestURI(), r.ProtoMajor, r.ProtoMinor)
 	if r.Host != "" {
 		b.WriteString("Host: " + r.Host + "\n")
@@ -161,7 +161,40 @@ func dumpRequest(r *http.Request) {
 			b.WriteString("\nBODY:\n" + string(body) + "\n")
 		}
 	}
-	b.WriteString("----- end -----")
+	b.WriteString("----- 入站 end -----")
+	log.Print(b.String())
+}
+
+func dumpOutbound(r *http.Request, body []byte, nsKey, inSess, outSess string) {
+	var b strings.Builder
+	b.WriteString("\n----- 转发真实请求 -----\n")
+	if nsKey != "" {
+		fmt.Fprintf(&b, "命名空间: %s  会话: %q -> %q\n", nsKey, inSess, outSess)
+	}
+	uri := r.URL.String()
+	if r.URL.RawQuery != "" {
+		uri = r.URL.Path + "?" + r.URL.RawQuery
+	} else {
+		uri = r.URL.Path
+	}
+	fmt.Fprintf(&b, "%s %s://%s%s HTTP/1.1\n", r.Method, r.URL.Scheme, r.URL.Host, uri)
+	if r.Host != "" {
+		b.WriteString("Host: " + r.Host + "\n")
+	}
+	keys := make([]string, 0, len(r.Header))
+	for k := range r.Header {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		for _, v := range r.Header[k] {
+			fmt.Fprintf(&b, "%s: %s\n", k, v)
+		}
+	}
+	if len(body) > 0 {
+		b.WriteString("\nBODY:\n" + string(body) + "\n")
+	}
+	b.WriteString("----- 转发 end -----")
 	log.Print(b.String())
 }
 
@@ -268,6 +301,9 @@ func (p *Proxy) doLocal(ctx context.Context, fam string, in *http.Request, body 
 	if isStream {
 		outReq.Header.Set("Accept", "text/event-stream")
 		outReq.Header.Set("Cache-Control", "no-cache")
+	}
+	if p.cfg.dump {
+		dumpOutbound(outReq, body, ns, incomingSession, outSession)
 	}
 	outReq = outReq.WithContext(ctx)
 	tr := p.egress.transport(fam)
