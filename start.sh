@@ -27,7 +27,7 @@ CACHE_FILE="${CACHE_FILE:-$LOG_DIR/session-cache.json}"
 TUNNEL_FILE="${TUNNEL_FILE:-$LOG_DIR/tunnels.json}"
 SESSION_FILE="${SESSION_FILE:-$LOG_DIR/session-map.json}"
 DUMP="${DUMP:-0}"
-USER_AGENT="${USER_AGENT:-opencode/1.15.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13}"
+USER_AGENT="${USER_AGENT:-opencode/1.18.23 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14}"
 X_OPENCODE_CLIENT="${X_OPENCODE_CLIENT:-cli}"
 X_OPENCODE_PROJECT="${X_OPENCODE_PROJECT:-global}"
 

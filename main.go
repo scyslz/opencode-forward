@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	version          = "1.15.0"
-	defaultUserAgent = "opencode/" + version + " ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13"
+	version          = "1.18.23"
+	defaultUserAgent = "opencode/" + version + " ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 	defaultClient    = "cli"
 	defaultProject   = "global"
 )
