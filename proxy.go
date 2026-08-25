@@ -268,9 +268,17 @@ func (p *Proxy) buildOutbound(in *http.Request, outSession string) *http.Request
 		}
 	}
 	if p.cfg.authToken != "" {
-		out.Header.Set("Authorization", p.cfg.authToken)
+		tok := p.cfg.authToken
+		if !strings.HasPrefix(strings.ToLower(tok), "bearer ") {
+			tok = "Bearer " + tok
+		}
+		out.Header.Set("Authorization", tok)
 	} else if p.cfg.fwdInbound && p.cfg.inboundAuth != "" {
-		out.Header.Set("Authorization", p.cfg.inboundAuth)
+		tok := p.cfg.inboundAuth
+		if !strings.HasPrefix(strings.ToLower(tok), "bearer ") {
+			tok = "Bearer " + tok
+		}
+		out.Header.Set("Authorization", tok)
 	}
 	for _, h := range p.cfg.extraHeaders {
 		k, v, ok := strings.Cut(h, ":")
