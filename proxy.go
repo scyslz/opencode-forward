@@ -137,7 +137,7 @@ func isEmptySSE(data []byte) bool {
 	return false
 }
 
-func dumpRequest(r *http.Request) {
+func dumpRequest(r *http.Request, withBody bool) {
 	var b strings.Builder
 	b.WriteString("\n----- 入站原始请求 -----\n")
 	fmt.Fprintf(&b, "%s %s HTTP/%d.%d\n", r.Method, r.URL.RequestURI(), r.ProtoMajor, r.ProtoMinor)
@@ -154,18 +154,25 @@ func dumpRequest(r *http.Request) {
 			fmt.Fprintf(&b, "%s: %s\n", k, v)
 		}
 	}
-	if r.Body != nil {
+	if withBody && r.Body != nil {
 		body, _ := io.ReadAll(r.Body)
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		if len(body) > 0 {
 			b.WriteString("\nBODY:\n" + string(body) + "\n")
+		}
+	} else if !withBody && r.Body != nil {
+		// 仍需 peek 长度以提示但不打印内容，避免 Body 被消费
+		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if len(body) > 0 {
+			fmt.Fprintf(&b, "\n[BODY %d bytes, 需 VERBOSE=1 查看详情]\n", len(body))
 		}
 	}
 	b.WriteString("----- 入站 end -----")
 	log.Print(b.String())
 }
 
-func dumpOutbound(r *http.Request, body []byte, nsKey, inSess, outSess string) {
+func dumpOutbound(r *http.Request, body []byte, nsKey, inSess, outSess string, withBody bool) {
 	var b strings.Builder
 	b.WriteString("\n----- 转发真实请求 -----\n")
 	if nsKey != "" {
@@ -191,8 +198,10 @@ func dumpOutbound(r *http.Request, body []byte, nsKey, inSess, outSess string) {
 			fmt.Fprintf(&b, "%s: %s\n", k, v)
 		}
 	}
-	if len(body) > 0 {
+	if withBody && len(body) > 0 {
 		b.WriteString("\nBODY:\n" + string(body) + "\n")
+	} else if !withBody && len(body) > 0 {
+		fmt.Fprintf(&b, "\n[BODY %d bytes, 需 VERBOSE=1 查看详情]\n", len(body))
 	}
 	b.WriteString("----- 转发 end -----")
 	log.Print(b.String())
@@ -311,7 +320,7 @@ func (p *Proxy) doLocal(ctx context.Context, fam string, in *http.Request, body 
 		outReq.Header.Set("Cache-Control", "no-cache")
 	}
 	if p.cfg.dump {
-		dumpOutbound(outReq, body, ns, incomingSession, outSession)
+		dumpOutbound(outReq, body, ns, incomingSession, outSession, p.cfg.verbose)
 	}
 	outReq = outReq.WithContext(ctx)
 	tr := p.egress.transport(fam)
@@ -383,7 +392,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if p.cfg.dump {
-		dumpRequest(r)
+		dumpRequest(r, p.cfg.verbose)
 	}
 
 	body, _ := io.ReadAll(r.Body)
