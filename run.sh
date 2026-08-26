@@ -39,7 +39,7 @@ ask() { # $1=环境变量名 $2=提示 $3=默认值 -> stdout
     local env="$1" p="$2" d="$3" v=""
     eval "v=\"\${$env:-}\""
     [ -n "$v" ] && { echo "$v"; return; }
-    if printf '%s [%s]: ' "$p" "$d" > /dev/tty 2>/dev/null; then
+    if { printf '%s [%s]: ' "$p" "$d" 2>/dev/null > /dev/tty; } 2>/dev/null; then
         read -r -t 60 v < /dev/tty || v=""
         echo "" > /dev/tty 2>/dev/null
     fi
@@ -64,6 +64,27 @@ ARGS=(--cache-file "$BASE/session-cache.json" --egress-prefer "$EGRESS_PREFER")
 [ -n "$CLUSTER_TOKEN" ]  && ARGS+=(--cluster-join "$CLUSTER_JOIN")
 [ -n "$MODEL" ]          && ARGS+=(--model "$MODEL")
 
+# 启动前检查端口占用
+port_busy() {
+    if command -v ss >/dev/null 2>&1; then
+        ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${PORT}$" && return 0
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${PORT}$" && return 0
+    else
+        (echo > "/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+if port_busy; then
+    echo "错误: 端口 $PORT 已被占用, 换一个或先停掉占用进程"
+    exit 1
+fi
+
+# 后台启动: 第一个参数 -d / --daemon, 或环境变量 DAEMON=1
+DAEMON="${DAEMON:-}"
+[ "$1" = "-d" ] || [ "$1" = "--daemon" ] && DAEMON=1
+
 echo ""
 echo "------------------------------"
 echo " 端口: $PORT"
@@ -79,7 +100,22 @@ esac
 [ -n "$CLUSTER_LISTEN" ] && echo " 集群监听: $CLUSTER_LISTEN"
 [ -n "$CLUSTER_TOKEN" ]  && echo " 加入集群: $CLUSTER_JOIN" || echo " 加入集群: 否"
 [ -n "$MODEL" ]          && echo " 模型替换: $MODEL"      || echo " 模型替换: 无"
-echo " 按 Ctrl+C 停止"
-echo "------------------------------"
 
-exec "$BIN" ":$PORT" https://opencode.ai/zen/v1 "${ARGS[@]}"
+if [ "$DAEMON" = "1" ]; then
+    nohup "$BIN" ":$PORT" https://opencode.ai/zen/v1 "${ARGS[@]}" \
+        > "$BASE/opencode-zen-proxy.log" 2>&1 &
+    echo $! > "$BASE/opencode-zen-proxy.pid"
+    sleep 1
+    if kill -0 "$(cat "$BASE/opencode-zen-proxy.pid")" 2>/dev/null; then
+        echo " 已后台启动 (pid $(cat "$BASE/opencode-zen-proxy.pid"))"
+        echo " 日志: $BASE/opencode-zen-proxy.log"
+        echo " 停止: kill \$(cat $BASE/opencode-zen-proxy.pid)"
+    else
+        echo " 启动失败, 查看日志: $BASE/opencode-zen-proxy.log"
+        exit 1
+    fi
+else
+    echo " 按 Ctrl+C 停止"
+    echo "------------------------------"
+    exec "$BIN" ":$PORT" https://opencode.ai/zen/v1 "${ARGS[@]}"
+fi
