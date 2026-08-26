@@ -30,15 +30,9 @@ if [ ! -x "$BIN" ]; then
     echo "未找到本地二进制, 从 GitHub Release 下载 ($TAG linux-$ARCH)..."
     URL="https://github.com/${REPO}/releases/download/${TAG}/opencode-zen-proxy-linux-${ARCH}.tar.gz"
     command -v curl >/dev/null || { echo "需要 curl"; exit 1; }
-    TMP="$(mktemp -d)"
-    # 整包解压再查找二进制: 包内成员名可能带 ./ 前缀, BusyBox tar 严格匹配会失败
-    if ! curl -fsSL "$URL" -o "$TMP/pkg.tar.gz"; then
-        echo "下载失败: $URL"; rm -rf "$TMP"; exit 1
-    fi
-    tar -xzf "$TMP/pkg.tar.gz" -C "$TMP" 2>/dev/null || tar -xf "$TMP/pkg.tar.gz" -C "$TMP"
-    BIN_SRC="$(find "$TMP" -type f -name opencode-zen-proxy | head -n1)"
-    [ -n "$BIN_SRC" ] || { echo "包内未找到 opencode-zen-proxy"; rm -rf "$TMP"; exit 1; }
-    mv "$BIN_SRC" "$BIN" && chmod +x "$BIN" && rm -rf "$TMP"
+    rm -rf /tmp/zen-download && mkdir -p /tmp/zen-download
+    curl -fsSL "$URL" | tar -zxvf - -C /tmp/zen-download
+    mv /tmp/zen-download/opencode-zen-proxy "$BIN" && chmod +x "$BIN"
     echo "已下载: $BIN"
 fi
 
