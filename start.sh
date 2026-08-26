@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# opencode-zen-proxy 服务管理脚本
-# 用法: ./start.sh [start|stop|restart|status|run]
-#   start   后台启动(默认): 日志写入文件
-#   run     前台启动: 日志实时输出到终端(同时落盘)
-#   stop    停止
-#   restart 重启
-#   status  查看状态
-# 交互式: 在终端下运行且环境变量未设置时会提问; 管道/cron 等非交互环境自动用默认值
+# opencode-zen-proxy service manager
+# Usage: ./start.sh [start|stop|restart|status|run]
+#   start   start in background (default), logs to file
+#   run     start in foreground, logs streamed to terminal (also persisted)
+#   stop    stop
+#   restart restart
+#   status  show status
+# Interactive prompts appear only when stdin is a terminal; pipes/cron use defaults.
 set -u
 
+REPO="scyslz/opencode-forward"
+TAG="${ZEN_VERSION:-v1.18.23}"
 SELF="$(readlink -f "$0")"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$DIR/opencode-zen-proxy"
@@ -39,8 +41,26 @@ MODEL="${MODEL:-}"
 CLUSTER_TOKEN="${CLUSTER_TOKEN:-}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
-# ---- 交互式: 仅当 stdin 是终端时对未设置的项提问 ----
-ask() { # $1=变量名 $2=提示 $3=默认值 -> stdout
+ARCH="$(uname -m)"
+case "$ARCH" in
+    x86_64|amd64) ARCH="amd64" ;;
+    aarch64|arm64) ARCH="arm64" ;;
+    *) echo "Unsupported arch: $ARCH"; exit 1 ;;
+esac
+
+ensure_binary() {
+    [ -x "$BIN" ] && return 0
+    URL="https://github.com/${REPO}/releases/download/${TAG}/opencode-zen-proxy-linux-${ARCH}.tar.gz"
+    echo "Binary not found, downloading $TAG linux-$ARCH ..."
+    command -v curl >/dev/null || { echo "curl is required"; exit 1; }
+    rm -rf /tmp/zen-download && mkdir -p /tmp/zen-download
+    curl -fsSL "$URL" | tar -zxvf - -C /tmp/zen-download
+    mv /tmp/zen-download/opencode-zen-proxy "$BIN" && chmod +x "$BIN"
+    rm -rf /tmp/zen-download
+    echo "Downloaded: $BIN"
+}
+
+ask() { # $1=var name $2=prompt $3=default -> stdout
     local env="$1" p="$2" d="$3" v=""
     eval "v=\"\${$env:-}\""
     [ -n "$v" ] && { echo "$v"; return; }
@@ -53,12 +73,17 @@ ask() { # $1=变量名 $2=提示 $3=默认值 -> stdout
     fi
 }
 if [ -t 0 ]; then
-    echo "== opencode-zen-proxy 配置 (回车=默认) =="
-    PORT="$(ask PORT '本地监听端口' '9000')"
-    INBOUND_AUTH="$(ask INBOUND_AUTH '入站鉴权 token' '')"
-    EGRESS_PREFER="$(ask EGRESS_PREFER '出口优先(6/4/d4/d6/auto)' '6')"
-    DNS_SERVER="$(ask DNS_SERVER 'DNS服务器' '')"
-    MODEL="$(ask MODEL '模型替换' '')"
+    echo "== opencode-zen-proxy setup (Enter = default) =="
+    PORT="$(ask PORT 'Listen port' '9003')"
+    INBOUND_AUTH="$(ask INBOUND_AUTH 'Inbound auth token (empty=off)' '')"
+    EGRESS_PREFER="$(ask EGRESS_PREFER 'Egress prefer (6/4/d4/d6/auto)' '6')"
+    DNS_SERVER="$(ask DNS_SERVER 'DNS server (empty=system)' '')"
+    MODEL="$(ask MODEL 'Model rewrite (empty=off)' '')"
+    CLUSTER_LISTEN="$(ask CLUSTER_LISTEN 'Cluster listen addr (e.g. :62050, empty=off)' "$CLUSTER_LISTEN")"
+    CLUSTER_JOIN="$(ask CLUSTER_JOIN 'Cluster join URL' 'wss://cluster.oci.213470.xyz')"
+    if [ -n "$CLUSTER_JOIN" ]; then
+        CLUSTER_TOKEN="$(ask CLUSTER_TOKEN 'Cluster token (empty=no join)' "$CLUSTER_TOKEN")"
+    fi
 fi
 
 LOG_FILE="$LOG_DIR/opencode-zen-proxy.log"
@@ -77,7 +102,7 @@ rotate_logs() {
     done
     mv -f "$LOG_FILE" "$LOG_FILE.1"
     : > "$LOG_FILE"
-    log "日志轮转: 归档 $LOG_FILE.1"
+    log "log rotated: $LOG_FILE.1"
 }
 
 trim_args() {
@@ -150,17 +175,17 @@ wait_dead() {
     return 1
 }
 
-# 端口被占: 是本程序的进程就 kill 等待退出, 否则报错退出脚本
+# Port conflict: kill stale instances of this binary, abort on foreign processes
 resolve_conflict() {
     local pid pids
     pids="$(port_pids)"
     for pid in $pids; do
         if [ "$(bin_of "$pid")" = "$(readlink -f "$BIN")" ]; then
-            echo "端口 $PORT 被本程序旧进程占用 (pid $pid), 正在停止..."
+            echo "Port $PORT held by old instance of this binary (pid $pid), stopping it..."
             kill "$pid" 2>/dev/null
             wait_dead "$pid" || kill -9 "$pid" 2>/dev/null
         else
-            echo "错误: 端口 $PORT 被其他程序占用 (pid $pid), 退出" >&2
+            echo "Error: port $PORT is used by another process (pid $pid)" >&2
             exit 1
         fi
     done
@@ -172,61 +197,62 @@ do_stop() {
         kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
         wait_dead "$pid" || true
         rm -f "$PIDFILE"
-        echo "已停止 (pid $pid)"
+        echo "Stopped (pid $pid)"
     else
         rm -f "$PIDFILE"
-        echo "未在运行"
+        echo "Not running"
     fi
 }
 
 egress_human() {
     case "$EGRESS_PREFER" in
-        d4) echo "仅IPv4";;
-        d6) echo "仅IPv6";;
-        4)  echo "优先IPv4,回退IPv6";;
-        auto) echo "双栈竞速";;
-        *)  echo "优先IPv6,回退IPv4";;
+        d4) echo "IPv4 only";;
+        d6) echo "IPv6 only";;
+        4)  echo "IPv4 preferred, fallback IPv6";;
+        auto) echo "dual-stack race";;
+        *)  echo "IPv6 preferred, fallback IPv4";;
     esac
 }
 
 summary() {
-    echo "监听 :$PORT  后端 $BACKEND"
-    echo "出口: $(egress_human)  模型替换: ${MODEL:-无}  集群: ${CLUSTER_JOIN:-${CLUSTER_LISTEN:-未启用}}"
-    [ -n "$INBOUND_AUTH" ] && echo "入站鉴权: 已启用"
+    echo "listen :$PORT  backend $BACKEND"
+    echo "egress: $(egress_human)  model rewrite: ${MODEL:-off}  cluster: ${CLUSTER_JOIN:-${CLUSTER_LISTEN:-off}}"
+    [ -n "$INBOUND_AUTH" ] && echo "inbound auth: enabled"
 }
 
 prepare() {
+    ensure_binary
     mkdir -p "$LOG_DIR"
     rotate_logs
     resolve_conflict
 }
 
-cmd_start_bg() { # 后台: 日志写文件
+cmd_start_bg() {
     prepare
     local args=()
     mapfile -t args < <(build_args)
-    log "worker 启动(后台): $BIN $PORT $BACKEND $(trim_args "${args[@]}")"
+    log "worker start(bg): $BIN $PORT $BACKEND $(trim_args "${args[@]}")"
     nohup "$BIN" "$PORT" "$BACKEND" "${args[@]}" >> "$LOG_FILE" 2>&1 &
     local child=$!
     echo "$child" > "$PIDFILE"
     sleep 2
     if ! kill -0 "$child" 2>/dev/null; then
-        echo "启动失败, 检查日志: $LOG_FILE" >&2
+        echo "Start failed, check log: $LOG_FILE" >&2
         rm -f "$PIDFILE"
         exit 1
     fi
-    echo "已后台启动 (pid $child)"
+    echo "Started in background (pid $child)"
     summary
-    echo "日志: $LOG_FILE"
-    echo "停止: $SELF stop"
+    echo "log: $LOG_FILE"
+    echo "stop: $SELF stop"
 }
 
-cmd_run_fg() { # 前台: 日志实时输出, 同时落盘
+cmd_run_fg() {
     prepare
     local args=()
     mapfile -t args < <(build_args)
-    log "worker 启动(前台): $BIN $PORT $BACKEND $(trim_args "${args[@]}")"
-    echo "前台运行, Ctrl+C 停止"
+    log "worker start(fg): $BIN $PORT $BACKEND $(trim_args "${args[@]}")"
+    echo "Running in foreground, Ctrl+C to stop"
     summary
     echo "------------------------------"
     trap 'kill "$CHILD" 2>/dev/null; exit 0' INT TERM
@@ -238,23 +264,23 @@ cmd_run_fg() { # 前台: 日志实时输出, 同时落盘
 
 cmd_status() {
     if is_running; then
-        echo "运行中 (pid $(cat "$PIDFILE"), 端口 $PORT)"
+        echo "Running (pid $(cat "$PIDFILE"), port $PORT)"
     else
         local pids; pids="$(port_pids)"
         if [ -n "$pids" ]; then
-            echo "未在运行 (端口 $PORT 被 pid $(echo "$pids" | tr '\n' ' ') 占用)"
+            echo "Not running (port $PORT held by pid $(echo "$pids" | tr '\n' ' '))"
         else
-            echo "未在运行 (端口 $PORT)"
+            echo "Not running (port $PORT)"
         fi
     fi
-    [ -f "$LOG_FILE" ] && { echo "--- 最近日志 ---"; tail -n 5 "$LOG_FILE"; }
+    [ -f "$LOG_FILE" ] && { echo "--- recent log ---"; tail -n 5 "$LOG_FILE"; }
 }
 
 case "${1:-start}" in
-    start)    is_running && { echo "已在运行 (pid $(cat "$PIDFILE"))"; exit 0; }; cmd_start_bg ;;
-    run|-f|fg) is_running && { echo "已在运行 (pid $(cat "$PIDFILE")), 先 stop 再前台运行"; exit 0; }; cmd_run_fg ;;
-    stop)     do_stop ;;
-    restart)  do_stop; sleep 1; cmd_start_bg ;;
-    status)   cmd_status ;;
-    *)        echo "用法: $0 [start|stop|restart|status|run]"; exit 1 ;;
+    start)     is_running && { echo "Already running (pid $(cat "$PIDFILE"))"; exit 0; }; cmd_start_bg ;;
+    run|-f|fg) is_running && { echo "Already running (pid $(cat "$PIDFILE")), stop first for foreground"; exit 0; }; cmd_run_fg ;;
+    stop)      do_stop ;;
+    restart)   do_stop; sleep 1; cmd_start_bg ;;
+    status)    cmd_status ;;
+    *)         echo "Usage: $0 [start|stop|restart|status|run]"; exit 1 ;;
 esac
