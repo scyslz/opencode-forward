@@ -57,7 +57,6 @@ func usage() {
   --cache-file <path>  会话映射持久化文件(JSON)
   --tunnel-file <path> 集群隧道连接信息持久化文件(JSON), 记录建立/关闭/帧数
   --xff                追加 X-Forwarded-For
-  --gen-request        兼容旧参数(已无意义)
   --ip-interval <dur>  出口IP探测周期, 如 5m (默认 5m)
   --ip-url <url>       出口IP探测服务 (默认 IPv4: https://api.ipify.org, IPv6: https://api6.ipify.org)
   --egress-prefer <4|6|auto>  本机出口优先级, 默认 6 (6→4; auto为并发HappyEyeballs) (别名 --prefer)
@@ -100,7 +99,6 @@ func main() {
 	verbose := false
 	dump := false
 	xff := false
-	genRequest := false
 	logLevelArg := ""
 	authToken := ""
 	inboundAuth := ""
@@ -117,7 +115,6 @@ func main() {
 		"X-Opencode-Client":  defaultClient,
 		"X-Opencode-Project": defaultProject,
 	}
-	_ = genRequest
 
 	for i := 0; i < len(extraArgs); i++ {
 		arg := extraArgs[i]
@@ -128,8 +125,6 @@ func main() {
 			dump = true
 		case arg == "--xff":
 			xff = true
-		case arg == "--gen-request":
-			genRequest = true
 		case arg == "--log-level":
 			if i+1 < len(extraArgs) {
 				i++
