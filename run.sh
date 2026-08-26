@@ -13,9 +13,12 @@ case "$ARCH" in
     *) echo "不支持的架构: $ARCH"; exit 1 ;;
 esac
 
-ask() { # $1=提示  $2=默认值  -> 结果输出到 stdout
-    local p="$1" d="$2" v
-    if [ -n "$d" ]; then read -r -p "$p [$d]: " v || v=""; else read -r -p "$p: " v || v=""; fi
+ask() { # $1=环境变量名(优先) $2=提示 $3=默认值 -> stdout
+    local env="$1" p="$2" d="$3" v=""
+    eval "v=\"\${$env:-}\""
+    [ -n "$v" ] && { echo "$v"; return; }
+    # curl|bash 时 stdin 是脚本本身, 必须从 /dev/tty 读交互输入; 无 tty 则用默认值
+    if read -r -p "$p [$d]: " v </dev/tty 2>/dev/null; then :; else v=""; fi
     echo "${v:-$d}"
 }
 
@@ -33,15 +36,15 @@ if [ ! -x "$BIN" ]; then
     echo "已下载: $BIN"
 fi
 
-INBOUND_AUTH="$(ask '入站鉴权 token (客户端需带 Bearer, 回车=不启用)' '')"
-PORT="$(ask '本地监听端口' '9003')"
-CLUSTER_LISTEN="$(ask '集群监听地址 (如 :62050, 回车=不监听)' '')"
-CLUSTER_JOIN="$(ask '加入集群地址' 'wss://cluster.oci.213470.xyz')"
+INBOUND_AUTH="$(ask INBOUND_AUTH '入站鉴权 token (客户端需带 Bearer, 回车=不启用)' '')"
+PORT="$(ask PORT '本地监听端口' '9003')"
+CLUSTER_LISTEN="$(ask CLUSTER_LISTEN '集群监听地址 (如 :62050, 回车=不监听)' '')"
+CLUSTER_JOIN="$(ask CLUSTER_JOIN '加入集群地址' 'wss://cluster.oci.213470.xyz')"
 CLUSTER_TOKEN=""
 if [ -n "$CLUSTER_JOIN" ] || [ -n "$CLUSTER_LISTEN" ]; then
-    CLUSTER_TOKEN="$(ask '集群 token (回车=不加入/不启用)' '')"
+    CLUSTER_TOKEN="$(ask CLUSTER_TOKEN '集群 token (回车=不加入/不启用)' '')"
 fi
-MODEL="$(ask '模型替换 (请求体 model 替换为该值, 回车=不替换)' '')"
+MODEL="$(ask MODEL '模型替换 (请求体 model 替换为该值, 回车=不替换)' '')"
 
 ARGS=(--cache-file ./session-cache.json --egress-prefer 6)
 [ -n "$INBOUND_AUTH" ]   && ARGS+=(--inbound-auth "$INBOUND_AUTH")
