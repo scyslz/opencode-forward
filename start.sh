@@ -50,11 +50,13 @@ esac
 
 ensure_binary() {
     [ -x "$BIN" ] && return 0
-    URL="https://github.com/${REPO}/releases/download/${TAG}/opencode-zen-proxy-linux-${ARCH}.tar.gz"
+    local url="https://github.com/${REPO}/releases/download/${TAG}/opencode-zen-proxy-linux-${ARCH}.tar.gz"
     echo "Binary not found, downloading $TAG linux-$ARCH ..."
     command -v curl >/dev/null || { echo "curl is required"; exit 1; }
     rm -rf /tmp/zen-download && mkdir -p /tmp/zen-download
-    curl -fsSL "$URL" | tar -zxvf - -C /tmp/zen-download
+    # download to file first: piping into tar breaks on slow/stalled upstreams
+    curl -fsSL -o /tmp/zen-download/pkg.tar.gz "$url" || { echo "Download failed: $url"; rm -rf /tmp/zen-download; exit 1; }
+    tar -zxf /tmp/zen-download/pkg.tar.gz -C /tmp/zen-download
     mv /tmp/zen-download/opencode-zen-proxy "$BIN" && chmod +x "$BIN"
     rm -rf /tmp/zen-download
     echo "Downloaded: $BIN"
