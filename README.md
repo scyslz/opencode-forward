@@ -39,13 +39,13 @@ go build -o opencode-zen-proxy .
 
 ### One-liner (curl | bash)
 
-交互式一键运行: 自动下载二进制 → 依次询问 入站鉴权 / 本地端口(默认9003) / 集群监听 / 加入集群地址(默认 wss://cluster.oci.213470.xyz) / 集群token / 模型替换, 全部回车即默认。
+Interactive quick start: auto-downloads the binary, then prompts for inbound auth / local port (default 9003) / cluster listen address / cluster join URL (default wss://cluster.oci.213470.xyz) / cluster token / model rewrite. Press Enter at any prompt to accept the default.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/scyslz/opencode-forward/master/run.sh | bash
 ```
 
-指定版本下载:
+Download a specific version:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/scyslz/opencode-forward/master/run.sh | ZEN_VERSION=v1.18.23 bash
