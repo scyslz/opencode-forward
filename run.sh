@@ -48,14 +48,17 @@ ask() { # $1=环境变量名 $2=提示 $3=默认值 -> stdout
 
 INBOUND_AUTH="$(ask INBOUND_AUTH '入站鉴权 token (回车=不启用)' '')"
 PORT="$(ask PORT '本地监听端口' '9003')"
+EGRESS_PREFER="$(ask EGRESS_PREFER '出口优先 (6=优先IPv6回退IPv4 / 4=优先IPv4回退IPv6 / d4=仅IPv4 / d6=仅IPv6 / auto)' '6')"
+DNS_SERVER="$(ask DNS_SERVER 'DNS 服务器 (如 8.8.8.8, 回车=系统默认)' '')"
 CLUSTER_LISTEN="$(ask CLUSTER_LISTEN '集群监听地址 (如 :62050, 回车=不监听)' '')"
 CLUSTER_JOIN="$(ask CLUSTER_JOIN '加入集群地址' 'wss://cluster.oci.213470.xyz')"
 CLUSTER_TOKEN=""
 [ -n "$CLUSTER_JOIN" ] && CLUSTER_TOKEN="$(ask CLUSTER_TOKEN '集群 token (回车=不加入)' '')"
 MODEL="$(ask MODEL '模型替换 (回车=不替换)' '')"
 
-ARGS=(--cache-file "$BASE/session-cache.json" --egress-prefer 6)
+ARGS=(--cache-file "$BASE/session-cache.json" --egress-prefer "$EGRESS_PREFER")
 [ -n "$INBOUND_AUTH" ]   && ARGS+=(--inbound-auth "$INBOUND_AUTH")
+[ -n "$DNS_SERVER" ]     && ARGS+=(--dns-server "$DNS_SERVER")
 [ -n "$CLUSTER_LISTEN" ] && ARGS+=(--cluster-listen "$CLUSTER_LISTEN")
 [ -n "$CLUSTER_TOKEN" ]  && ARGS+=(--cluster-token "$CLUSTER_TOKEN")
 [ -n "$CLUSTER_TOKEN" ]  && ARGS+=(--cluster-join "$CLUSTER_JOIN")
@@ -64,6 +67,14 @@ ARGS=(--cache-file "$BASE/session-cache.json" --egress-prefer 6)
 echo ""
 echo "------------------------------"
 echo " 端口: $PORT"
+case "$EGRESS_PREFER" in
+    d4) echo " 出口: 仅IPv4" ;;
+    d6) echo " 出口: 仅IPv6" ;;
+    4)  echo " 出口: 优先IPv4,回退IPv6" ;;
+    auto) echo " 出口: 双栈竞速" ;;
+    *) echo " 出口: 优先IPv6,回退IPv4" ;;
+esac
+[ -n "$DNS_SERVER" ]     && echo " DNS: $DNS_SERVER"
 [ -n "$INBOUND_AUTH" ]   && echo " 入站鉴权: 已启用"     || echo " 入站鉴权: 关闭"
 [ -n "$CLUSTER_LISTEN" ] && echo " 集群监听: $CLUSTER_LISTEN"
 [ -n "$CLUSTER_TOKEN" ]  && echo " 加入集群: $CLUSTER_JOIN" || echo " 加入集群: 否"
