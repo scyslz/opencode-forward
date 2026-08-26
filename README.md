@@ -37,14 +37,22 @@ go build -o opencode-zen-proxy .
 
 ## Usage
 
-### Quick Start
+### One-liner (curl | bash)
 
 ```bash
-go build -o opencode-zen-proxy .
-./start.sh start
+# 交互式: 在终端下运行会依次提问 (端口默认9003 / 入站鉴权 / 出口优先 / DNS / 集群 / 模型替换), 回车=默认
+curl -fsSL https://raw.githubusercontent.com/scyslz/opencode-forward/master/start.sh -o start.sh && bash start.sh start
+
+# 前台运行实时看日志
+bash start.sh run
+
+# 非交互式: 管道/cron 自动跳过提问, 用环境变量覆盖
+PORT=9003 MODEL=gpt-5 bash start.sh start </dev/null
 ```
 
-Interactive vs non-interactive: when run from a terminal with unset env vars, key options are prompted (port default 9003, egress preference, DNS, cluster join default wss://cluster.oci.213470.xyz, model rewrite — Enter accepts defaults); in pipes/cron all prompts are skipped and defaults/env apply.
+需先编译或下载二进制到同目录 (`go build -o opencode-zen-proxy .`)。
+
+### Service management (start.sh)
 
 | Command | Behavior |
 |---|---|
@@ -56,9 +64,7 @@ Interactive vs non-interactive: when run from a terminal with unset env vars, ke
 
 Port conflict handling: if the port is held by an old instance of this binary it is stopped automatically and replaced; if held by another program the script exits with an error.
 
-```bash
-OUTBOUND_AUTH="Bearer sk-..." ./start.sh start
-```
+### Service management (start.sh)
 
 ### Cluster
 
