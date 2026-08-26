@@ -27,6 +27,7 @@ CACHE_FILE="${CACHE_FILE:-$LOG_DIR/session-cache.json}"
 TUNNEL_FILE="${TUNNEL_FILE:-$LOG_DIR/tunnels.json}"
 SESSION_FILE="${SESSION_FILE:-$LOG_DIR/session-map.json}"
 DUMP="${DUMP:-0}"
+MODEL="${MODEL:-}"
 USER_AGENT="${USER_AGENT:-opencode/1.18.23 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14}"
 X_OPENCODE_CLIENT="${X_OPENCODE_CLIENT:-cli}"
 X_OPENCODE_PROJECT="${X_OPENCODE_PROJECT:-global}"
@@ -82,6 +83,7 @@ build_args() {
     [ -n "$X_OPENCODE_CLIENT" ] && a+=(--header "x-opencode-client: $X_OPENCODE_CLIENT")
     [ -n "$X_OPENCODE_PROJECT" ] && a+=(--header "x-opencode-project: $X_OPENCODE_PROJECT")
     [ "$DUMP" = "1" ] && a+=(--dump)
+    [ -n "$MODEL" ] && a+=(--model "$MODEL")
     a+=(--ip-interval "$IP_INTERVAL")
     [ -n "$IP_URL" ] && a+=(--ip-url "$IP_URL")
     [ -n "$DNS_SERVER" ] && a+=(--dns-server "$DNS_SERVER")
@@ -96,7 +98,7 @@ worker() {
     mapfile -t args < <(build_args)
     local safe_args; safe_args=$(trim_args_for_log "${args[@]}")
     echo "[$(date '+%F %T')] worker 启动: $BIN $PORT $BACKEND $safe_args" >> "$LOG_FILE"
-    log "worker 启动: 端口=$PORT backend=$BACKEND egress-prefer=$EGRESS_PREFER cache=$CACHE_FILE session-map=$SESSION_FILE cluster=$CLUSTER_LISTEN/$CLUSTER_JOIN level=$LOG_LEVEL verbose=$VERBOSE rotate=${LOG_MAX_MB}MBx${LOG_MAX_FILES}"
+    log "worker 启动: 端口=$PORT backend=$BACKEND egress-prefer=$EGRESS_PREFER cache=$CACHE_FILE session-map=$SESSION_FILE cluster=$CLUSTER_LISTEN/$CLUSTER_JOIN model=${MODEL:-未替换} level=$LOG_LEVEL verbose=$VERBOSE rotate=${LOG_MAX_MB}MBx${LOG_MAX_FILES}"
     "$BIN" "$PORT" "$BACKEND" "${args[@]}" >> "$LOG_FILE" 2>&1
 }
 
@@ -153,6 +155,7 @@ start() {
         if [ "$VERBOSE" = "1" ]; then echo "已启动 (pid $child_pid)  日志 VERBOSE=1/debug (含每请求)"; else echo "已启动 (pid $child_pid)  日志 $LOG_LEVEL 精简"; fi
         echo "监听 :$PORT 单端口双栈  后端 $BACKEND"
         echo "出口 $(egress_human)  冷却 30s  探测 $IP_INTERVAL  集群 ${CLUSTER_JOIN:-${CLUSTER_LISTEN:-未启用}}"
+    [ -n "$MODEL" ] && echo "模型替换: $MODEL" || echo "模型替换: 未启用 (MODEL=模型名 开启)"
     else
         echo "启动失败，检查日志: $LOG_FILE"
         exit 1
