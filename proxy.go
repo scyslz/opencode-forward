@@ -218,6 +218,7 @@ type proxyConfig struct {
 	xff          bool
 	verbose      bool
 	dump         bool
+	rewriteModel string
 	extraHeaders []string
 	defaults     map[string]string
 }
@@ -401,6 +402,23 @@ func (p *Proxy) DoClusterForward(r *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
+// rewriteBodyModel 替换 JSON body 中的 "model" 字段; 非法 JSON 或无该字段时原样返回
+func rewriteBodyModel(body []byte, model string) ([]byte, bool) {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body, false
+	}
+	if _, ok := m["model"]; !ok {
+		return body, false
+	}
+	m["model"] = model
+	nb, err := json.Marshal(m)
+	if err != nil {
+		return body, false
+	}
+	return nb, true
+}
+
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.cluster != nil && (p.cluster.IsInternalPath(r.URL.Path) || r.URL.Path == "/_cluster/peers") {
 		if p.cluster.HandleHTTP(w, r) {
@@ -420,6 +438,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	body, _ := io.ReadAll(r.Body)
 	_ = r.Body.Close()
+
+	if p.cfg.rewriteModel != "" {
+		if nb, ok := rewriteBodyModel(body, p.cfg.rewriteModel); ok {
+			body = nb
+		}
+	}
 
 	visitedIn, hopIn := parseVisited(r)
 	visitedMap := map[string]bool{}

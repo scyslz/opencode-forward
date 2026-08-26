@@ -49,6 +49,7 @@ func usage() {
   --verbose            打印每条请求日志 (等价 --log-level debug)
   --log-level <lv>     日志级别 debug/info/warn/error (默认 info; 集群重试/ping仅debug)
   --dump               打印完整转发请求特征: 全部 header + body
+  --model <名称>        替换请求体 JSON 的 "model" 字段 (空=不替换, 默认)
   --outbound-auth <token>  转发给后端 Authorization: Bearer <token>
   --inbound-auth <token>   客户端访问本服务需带 Authorization: Bearer <token>
   -F, --forward-inbound-auth  转发使用 inbound-auth 的 token 作为后端 Authorization
@@ -105,6 +106,7 @@ func main() {
 	inboundAuth := ""
 	fwdInbound := false
 	cacheFile := ""
+	rewriteModel := ""
 	probeInterval := 5 * time.Minute
 	probeURL4 := ""
 	probeURL6 := ""
@@ -184,6 +186,11 @@ func main() {
 				i++
 				cacheFile = extraArgs[i]
 			}
+		case arg == "--model":
+			if i+1 < len(extraArgs) {
+				i++
+				rewriteModel = extraArgs[i]
+			}
 		case arg == "--header":
 			if i+1 < len(extraArgs) {
 				i++
@@ -222,6 +229,7 @@ func main() {
 		xff:          xff,
 		verbose:      verbose,
 		dump:         dump,
+		rewriteModel: rewriteModel,
 		extraHeaders: extraHeaders,
 		defaults:     defaults,
 	}
