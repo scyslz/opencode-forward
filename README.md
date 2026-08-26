@@ -37,6 +37,20 @@ go build -o opencode-zen-proxy .
 
 ## Usage
 
+### One-liner (curl | bash)
+
+交互式一键运行: 自动下载二进制 → 依次询问 入站鉴权 / 本地端口(默认9003) / 集群监听 / 加入集群地址(默认 wss://cluster.oci.213470.xyz) / 集群token / 模型替换, 全部回车即默认。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/scyslz/opencode-forward/master/run.sh | bash
+```
+
+指定版本下载:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/scyslz/opencode-forward/master/run.sh | ZEN_VERSION=v1.18.23 bash
+```
+
 ### Basic
 
 ```bash
