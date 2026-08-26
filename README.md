@@ -40,17 +40,22 @@ go build -o opencode-zen-proxy .
 ### One-liner (curl | bash)
 
 ```bash
-# 交互式: 在终端下运行会依次提问 (端口默认9003 / 入站鉴权 / 出口优先 / DNS / 集群 / 模型替换), 回车=默认
 curl -fsSL https://raw.githubusercontent.com/scyslz/opencode-forward/master/start.sh -o start.sh && bash start.sh start
-
-# 前台运行实时看日志
-bash start.sh run
-
-# 非交互式: 管道/cron 自动跳过提问, 用环境变量覆盖
-PORT=9003 MODEL=gpt-5 bash start.sh start </dev/null
 ```
 
-需先编译或下载二进制到同目录 (`go build -o opencode-zen-proxy .`)。
+Interactive: when run from a terminal, prompts for listen port (default 9003), inbound auth, egress preference, DNS, cluster and model rewrite — Enter accepts defaults. The binary is downloaded automatically if missing.
+
+Foreground with live logs:
+
+```bash
+bash start.sh run
+```
+
+Non-interactive (pipes/cron skip prompts; use env vars):
+
+```bash
+PORT=9003 MODEL=gpt-5 bash start.sh start </dev/null
+```
 
 ### Service management (start.sh)
 
@@ -64,15 +69,24 @@ PORT=9003 MODEL=gpt-5 bash start.sh start </dev/null
 
 Port conflict handling: if the port is held by an old instance of this binary it is stopped automatically and replaced; if held by another program the script exits with an error.
 
-### Service management (start.sh)
+### Build from source
+
+```bash
+go build -o opencode-zen-proxy .
+OUTBOUND_AUTH="Bearer sk-..." ./start.sh start
+```
 
 ### Cluster
 
-```bash
-# Public listener
-CLUSTER_LISTEN=:9443 CLUSTER_TOKEN=s3 ./start.sh start
+Public listener:
 
-# Private joiner
+```bash
+CLUSTER_LISTEN=:9443 CLUSTER_TOKEN=s3 ./start.sh start
+```
+
+Private joiner:
+
+```bash
 CLUSTER_JOIN=public:9443 CLUSTER_TOKEN=s3 ./start.sh start
 ```
 
