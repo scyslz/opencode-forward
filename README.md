@@ -39,35 +39,48 @@ go build -o opencode-zen-proxy .
 
 ### One-liner (curl | bash)
 
-Interactive quick start: auto-downloads the binary, then prompts for inbound auth / local port (default 9003) / cluster listen address / cluster join URL (default wss://cluster.oci.213470.xyz) / cluster token / model rewrite. Press Enter at any prompt to accept the default.
+Interactive quick start: auto-downloads the binary into `./opencode-zen-proxy/`, then prompts (Enter = default) for inbound auth / local port (default 9003) / egress preference / DNS server / cluster listen address / cluster join URL (default wss://cluster.oci.213470.xyz) / cluster token / model rewrite. Never hangs in non-interactive shells — prompts are skipped and defaults apply.
 
 ```bash
+# interactive
 curl -fsSL https://raw.githubusercontent.com/scyslz/opencode-forward/master/run.sh | bash
-```
 
-Download a specific version:
+# background + non-interactive via env vars
+curl -fsSL https://raw.githubusercontent.com/scyslz/opencode-forward/master/run.sh | bash -s -- -d
 
-```bash
+# pin a version
 curl -fsSL https://raw.githubusercontent.com/scyslz/opencode-forward/master/run.sh | ZEN_VERSION=v1.18.23 bash
 ```
 
-### Basic
+Env overrides: `PORT`, `INBOUND_AUTH`, `EGRESS_PREFER(6/4/d4/d6/auto)`, `DNS_SERVER`, `CLUSTER_LISTEN`, `CLUSTER_JOIN`, `CLUSTER_TOKEN`, `MODEL`, `DAEMON=1`.
+
+### Service management (start.sh)
+
+| Command | Behavior |
+|---|---|
+| `./start.sh start` | Start in background, logs to file |
+| `./start.sh run` | Start in foreground, logs streamed to terminal (also persisted) |
+| `./start.sh stop` | Stop |
+| `./start.sh restart` | Restart |
+| `./start.sh status` | Show status + last 5 log lines |
+
+Interactive vs non-interactive: when run from a terminal with unset env vars, key options are prompted; in pipes/cron all prompts are skipped and defaults/env apply.
+
+Port conflict handling: if the port is held by an old instance of this binary it is stopped automatically and replaced; if held by another program the script exits with an error.
 
 ```bash
 go build -o opencode-zen-proxy .
 OUTBOUND_AUTH="Bearer sk-..." ./start.sh start
 ```
 
-### Cluster: Public Listener
+### Cluster
 
 ```bash
-CLUSTER_LISTEN=:9443 CLUSTER_TOKEN=s3 ./start.sh start-listen
-```
+# Public listener
+CLUSTER_LISTEN=:9443 CLUSTER_TOKEN=s3 ./start.sh start
 
-### Cluster: Private Joiner
-
-```bash
-CLUSTER_JOIN=公网:9443 CLUSTER_TOKEN=s3 ./start.sh start-join
+# Private joiner
+CLUSTER_JOIN=public:9443 CLUSTER_TOKEN=s3 ./start.sh start
 ```
 
 ## Files
@@ -79,5 +92,6 @@ CLUSTER_JOIN=公网:9443 CLUSTER_TOKEN=s3 ./start.sh start-join
 | egress.go | dual-stack egress & probe manager |
 | cluster.go | private TLS+frame cluster protocol |
 | util.go | helpers |
-| start.sh | one-shot unified service script |
+| start.sh | unified service script (start/stop/restart/status/run) |
+| run.sh | one-liner installer & launcher (curl \| bash) |
 | opencode-zen-proxy.service | systemd unit |
