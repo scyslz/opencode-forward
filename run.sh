@@ -31,8 +31,14 @@ if [ ! -x "$BIN" ]; then
     URL="https://github.com/${REPO}/releases/download/${TAG}/opencode-zen-proxy-linux-${ARCH}.tar.gz"
     command -v curl >/dev/null || { echo "需要 curl"; exit 1; }
     TMP="$(mktemp -d)"
-    curl -fsSL "$URL" | tar -xz -C "$TMP" opencode-zen-proxy
-    mv "$TMP/opencode-zen-proxy" "$BIN" && chmod +x "$BIN" && rm -rf "$TMP"
+    # 整包解压再查找二进制: 包内成员名可能带 ./ 前缀, BusyBox tar 严格匹配会失败
+    if ! curl -fsSL "$URL" -o "$TMP/pkg.tar.gz"; then
+        echo "下载失败: $URL"; rm -rf "$TMP"; exit 1
+    fi
+    tar -xzf "$TMP/pkg.tar.gz" -C "$TMP" 2>/dev/null || tar -xf "$TMP/pkg.tar.gz" -C "$TMP"
+    BIN_SRC="$(find "$TMP" -type f -name opencode-zen-proxy | head -n1)"
+    [ -n "$BIN_SRC" ] || { echo "包内未找到 opencode-zen-proxy"; rm -rf "$TMP"; exit 1; }
+    mv "$BIN_SRC" "$BIN" && chmod +x "$BIN" && rm -rf "$TMP"
     echo "已下载: $BIN"
 fi
 
