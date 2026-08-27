@@ -55,7 +55,7 @@ ensure_binary() {
     command -v curl >/dev/null || { echo "curl is required"; exit 1; }
     rm -rf /tmp/zen-download && mkdir -p /tmp/zen-download
     # download to file first: piping into tar breaks on slow/stalled upstreams
-    curl -fsSL -o /tmp/zen-download/pkg.tar.gz "$url" || { echo "Download failed: $url"; rm -rf /tmp/zen-download; exit 1; }
+    curl -fsSL --connect-timeout 15 --max-time 120 -o /tmp/zen-download/pkg.tar.gz "$url" || { echo "Download failed: $url"; rm -rf /tmp/zen-download; exit 1; }
     tar -zxf /tmp/zen-download/pkg.tar.gz -C /tmp/zen-download
     mv /tmp/zen-download/opencode-zen-proxy "$BIN" && chmod +x "$BIN"
     rm -rf /tmp/zen-download
@@ -67,7 +67,7 @@ ask() { # $1=var name $2=prompt $3=default -> stdout
     eval "v=\"\${$env:-}\""
     [ -n "$v" ] && { echo "$v"; return; }
     if [ -t 0 ]; then
-        printf '%s [%s]: ' "$p" "$d"
+        printf '%s [%s]: ' "$p" "$d" >&2
         read -r v || v=""
         echo "${v:-$d}"
     else
@@ -82,10 +82,22 @@ if [ -t 0 ]; then
     DNS_SERVER="$(ask DNS_SERVER 'DNS server (empty=system)' '')"
     MODEL="$(ask MODEL 'Model rewrite (empty=off)' '')"
     CLUSTER_LISTEN="$(ask CLUSTER_LISTEN 'Cluster listen addr (e.g. :62050, empty=off)' "$CLUSTER_LISTEN")"
-    CLUSTER_JOIN="$(ask CLUSTER_JOIN 'Cluster join URL' 'wss://cluster.oci.213470.xyz')"
-    if [ -n "$CLUSTER_JOIN" ]; then
-        CLUSTER_TOKEN="$(ask CLUSTER_TOKEN 'Cluster token (empty=no join)' "$CLUSTER_TOKEN")"
+    if [ -n "$CLUSTER_LISTEN" ]; then
+        CLUSTER_JOIN=""
+        CLUSTER_TOKEN=""
+        echo "-> cluster_listen已设置 ($CLUSTER_LISTEN)，跳过 join 配置（互斥）" >&2
+    else
+        CLUSTER_JOIN="$(ask CLUSTER_JOIN 'Cluster join URL' 'wss://cluster.oci.213470.xyz')"
+        if [ -n "$CLUSTER_JOIN" ]; then
+            CLUSTER_TOKEN="$(ask CLUSTER_TOKEN 'Cluster token (empty=no join)' "$CLUSTER_TOKEN")"
+        fi
     fi
+fi
+# 互斥校验：有 listen 就不能 join（环境变量/参数也生效）
+if [ -n "$CLUSTER_LISTEN" ] && [ -n "$CLUSTER_JOIN" ]; then
+    echo "Warning: CLUSTER_LISTEN ($CLUSTER_LISTEN) 已设置，忽略 CLUSTER_JOIN ($CLUSTER_JOIN)（互斥，需二选一）" >&2
+    CLUSTER_JOIN=""
+    CLUSTER_TOKEN=""
 fi
 
 LOG_FILE="$LOG_DIR/opencode-zen-proxy.log"
