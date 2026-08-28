@@ -10,7 +10,7 @@
 set -u
 
 REPO="scyslz/opencode-forward"
-TAG="${ZEN_VERSION:-v1.18.23}"
+TAG="${ZEN_VERSION:-v1.18.26}"
 SELF="$(readlink -f "$0")"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$DIR/opencode-zen-proxy"
@@ -27,7 +27,7 @@ IP_INTERVAL="${IP_INTERVAL:-5m}"
 IP_URL="${IP_URL:-}"
 DUMP="${DUMP:-0}"
 VERBOSE="${VERBOSE:-0}"
-USER_AGENT="${USER_AGENT:-opencode/1.18.23 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14}"
+USER_AGENT="${USER_AGENT:-opencode/1.18.26 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14}"
 X_OPENCODE_CLIENT="${X_OPENCODE_CLIENT:-cli}"
 X_OPENCODE_PROJECT="${X_OPENCODE_PROJECT:-global}"
 LOG_DIR="${LOG_DIR:-$DIR/logs}"
@@ -77,27 +77,23 @@ ask() { # $1=var name $2=prompt $3=default -> stdout
 if [ -t 0 ]; then
     echo "== opencode-zen-proxy setup (Enter = default) =="
     PORT="$(ask PORT 'Listen port' '9003')"
-    INBOUND_AUTH="$(ask INBOUND_AUTH 'Inbound auth token (empty=off)' '')"
     EGRESS_PREFER="$(ask EGRESS_PREFER 'Egress prefer (6/4/d4/d6/auto)' '6')"
     DNS_SERVER="$(ask DNS_SERVER 'DNS server (empty=system)' '')"
     MODEL="$(ask MODEL 'Model rewrite (empty=off)' '')"
     CLUSTER_LISTEN="$(ask CLUSTER_LISTEN 'Cluster listen addr (e.g. :62050, empty=off)' "$CLUSTER_LISTEN")"
     if [ -n "$CLUSTER_LISTEN" ]; then
         CLUSTER_JOIN=""
-        CLUSTER_TOKEN=""
-        echo "-> cluster_listen已设置 ($CLUSTER_LISTEN)，跳过 join 配置（互斥）" >&2
+        echo "-> cluster listen enabled ($CLUSTER_LISTEN), skipping join (mutually exclusive)" >&2
     else
         CLUSTER_JOIN="$(ask CLUSTER_JOIN 'Cluster join URL' 'wss://cluster.oci.213470.xyz')"
-        if [ -n "$CLUSTER_JOIN" ]; then
-            CLUSTER_TOKEN="$(ask CLUSTER_TOKEN 'Cluster token (empty=no join)' "$CLUSTER_TOKEN")"
-        fi
+    fi
+    if [ -n "$CLUSTER_LISTEN" ] || [ -n "$CLUSTER_JOIN" ]; then
+        CLUSTER_TOKEN="$(ask CLUSTER_TOKEN 'Cluster token' "$CLUSTER_TOKEN")"
     fi
 fi
-# 互斥校验：有 listen 就不能 join（环境变量/参数也生效）
 if [ -n "$CLUSTER_LISTEN" ] && [ -n "$CLUSTER_JOIN" ]; then
-    echo "Warning: CLUSTER_LISTEN ($CLUSTER_LISTEN) 已设置，忽略 CLUSTER_JOIN ($CLUSTER_JOIN)（互斥，需二选一）" >&2
+    echo "Warning: CLUSTER_LISTEN ($CLUSTER_LISTEN) set, ignoring CLUSTER_JOIN ($CLUSTER_JOIN) (mutually exclusive)" >&2
     CLUSTER_JOIN=""
-    CLUSTER_TOKEN=""
 fi
 
 LOG_FILE="$LOG_DIR/opencode-zen-proxy.log"
@@ -269,11 +265,20 @@ cmd_run_fg() {
     echo "Running in foreground, Ctrl+C to stop"
     summary
     echo "------------------------------"
-    trap 'kill "$CHILD" 2>/dev/null; exit 0' INT TERM
+    trap 'kill "$BIN_PID" 2>/dev/null; wait "$BIN_PID" 2>/dev/null; rm -f "$PIDFILE"; exit 0' INT TERM
+    trap 'rm -f "$PIDFILE"' EXIT
+    set +o pipefail
+    set -o pipefail
     "$BIN" "$PORT" "$BACKEND" "${args[@]}" 2>&1 | tee -a "$LOG_FILE" &
-    CHILD=$!
-    echo "$CHILD" > "$PIDFILE"
-    wait "$CHILD"
+    TEE_PID=$!
+    # find actual binary pid (tee is the shell job pid)
+    sleep 0.3
+    BIN_PID="$(port_pids | head -n1)"
+    if [ -z "$BIN_PID" ]; then
+        BIN_PID="$TEE_PID"
+    fi
+    echo "$BIN_PID" > "$PIDFILE"
+    wait "$TEE_PID"
 }
 
 cmd_status() {

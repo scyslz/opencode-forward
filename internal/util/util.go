@@ -1,4 +1,4 @@
-package main
+package util
 
 import (
 	"crypto/rand"
@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 )
+
+var UpstreamTimeout = 300 * time.Second
 
 var (
 	logLevel   = 1
@@ -37,7 +39,7 @@ func init() {
 	}
 }
 
-func setLogLevel(s string) {
+func SetLogLevel(s string) {
 	logLevelMu.Lock()
 	defer logLevelMu.Unlock()
 	switch strings.ToLower(strings.TrimSpace(s)) {
@@ -52,28 +54,14 @@ func setLogLevel(s string) {
 	}
 }
 
-func logDebugf(format string, args ...any) {
+func LogDebugf(format string, args ...any) {
 	if logLevel > 0 {
 		return
 	}
 	log.Printf(format, args...)
 }
 
-func logInfof(format string, args ...any) {
-	if logLevel > 1 {
-		return
-	}
-	log.Printf(format, args...)
-}
-
-func logWarnf(format string, args ...any) {
-	if logLevel > 2 {
-		return
-	}
-	log.Printf(format, args...)
-}
-
-func logThrottledf(key string, interval time.Duration, format string, args ...any) {
+func LogThrottledf(key string, interval time.Duration, format string, args ...any) {
 	if logLevel > 0 {
 		throttleMu.Lock()
 		last, ok := throttleAt[key]
@@ -90,7 +78,7 @@ func logThrottledf(key string, interval time.Duration, format string, args ...an
 
 const base62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
-func randomHex(n int) string {
+func RandomHex(n int) string {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
 		return ""
@@ -98,11 +86,11 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-func secureCompare(a, b string) bool {
+func SecureCompare(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-func opencodeID(prefix string) string {
+func OpencodeID(prefix string) string {
 	var sb strings.Builder
 	sb.WriteString(prefix)
 	sb.WriteByte('_')
@@ -117,7 +105,7 @@ func opencodeID(prefix string) string {
 	return sb.String()
 }
 
-func joinPath(base, p string) string {
+func JoinPath(base, p string) string {
 	if base == "" {
 		if p == "" {
 			return "/"
@@ -134,7 +122,7 @@ func joinPath(base, p string) string {
 	return base + "/" + q
 }
 
-func parseBackend(arg string) (string, string, string, error) {
+func ParseBackend(arg string) (string, string, string, error) {
 	u := arg
 	if !strings.Contains(arg, "://") {
 		u = "http://" + arg
@@ -159,7 +147,7 @@ func parseBackend(arg string) (string, string, string, error) {
 	return parsed.Scheme, parsed.Host, basePath, nil
 }
 
-func isStackErrStatic(err error) bool {
+func IsStackErrStatic(err error) bool {
 	if err == nil {
 		return false
 	}

@@ -153,11 +153,9 @@ func dumpOutbound(r *http.Request, body []byte, nsKey, inSess, outSess string, w
 	if nsKey != "" {
 		fmt.Fprintf(&b, "命名空间: %s  会话: %q -> %q\n", nsKey, inSess, outSess)
 	}
-	uri := r.URL.String()
+	uri := r.URL.Path
 	if r.URL.RawQuery != "" {
-		uri = r.URL.Path + "?" + r.URL.RawQuery
-	} else {
-		uri = r.URL.Path
+		uri += "?" + r.URL.RawQuery
 	}
 	fmt.Fprintf(&b, "%s %s://%s%s HTTP/1.1\n", r.Method, r.URL.Scheme, r.URL.Host, uri)
 	if r.Host != "" {
@@ -235,13 +233,16 @@ func isHopByHop(k string) bool {
 	return false
 }
 
-// passthroughHeader 白名单: 仅放行真实 opencode CLI 会发送的头, 其余客户端头一律不透传
+// passthroughHeader 白名单: 放行 opencode CLI 真实会发送的头 + 客户端认证头,
+// hop-by-hop 与其余任意客户端头不透传 (默认 outbound 未配时依赖此透传客户端 Authorization)
 func passthroughHeader(k string) bool {
 	if isHopByHop(k) {
 		return false
 	}
 	switch strings.ToLower(k) {
-	case "accept", "content-type", "accept-encoding", "content-length":
+	case "accept", "content-type", "accept-encoding", "content-length",
+		"authorization", "user-agent",
+		"x-opencode-client", "x-opencode-project", "x-opencode-session", "x-opencode-request":
 		return true
 	}
 	return false
@@ -267,12 +268,10 @@ func normalizeProxyPath(p string) string {
 func joinPathDedup(base, p string) string {
 	p = normalizeProxyPath(p)
 	joined := joinPath(base, p)
-	// 去重 /v1 前缀: base 已含 /v1 时, 客户端再带 /v1 会导致 /v1/v1
-	// 例如 base=/zen/v1, p=/v1/responses -> /zen/v1/responses 而非 /zen/v1/v1/responses
 	if strings.HasSuffix(strings.TrimSuffix(base, "/"), "/v1") {
 		joined = strings.ReplaceAll(joined, "/v1/v1/", "/v1/")
 		if strings.HasSuffix(joined, "/v1/v1") {
-			joined = strings.TrimSuffix(joined, "/v1") + "/v1"
+			joined = strings.TrimSuffix(joined, "/v1/v1") + "/v1"
 		}
 	}
 	return joined
@@ -363,10 +362,6 @@ func (p *Proxy) doLocal(ctx context.Context, fam string, in *http.Request, body 
 		log.Printf("[opencode-proxy] %s %s%s -> IPv%s session:%q->%q status=%d stream=%v ct=%q cl=%d", in.Method, p.cfg.backendURL, in.URL.Path, fam, incomingSession, outSession, resp.StatusCode, isStream, resp.Header.Get("Content-Type"), resp.ContentLength)
 	}
 	return resp, nil
-}
-
-func (p *Proxy) DoClusterForward(r *http.Request) (*http.Response, error) {
-	return p.handleClusterForward(r)
 }
 
 func (p *Proxy) handleClusterForward(r *http.Request) (*http.Response, error) {
@@ -472,6 +467,94 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var lastErr error
 
 	tryLocalFamilies := func(ctx context.Context) (*http.Response, bool) {
+		if p.egress.egressPrefer == "auto" && len(order) == 2 && !p.egress.isStackDown(order[0]) && !p.egress.isStackDown(order[1]) {
+			type raceRes struct {
+				resp *http.Response
+				err  error
+				fam  string
+			}
+			isStream := isStreamRequest(body)
+			ctxRace, cancelRace := context.WithCancel(ctx)
+			defer cancelRace()
+			ch := make(chan raceRes, 2)
+			for idx, fam := range order {
+				fam := fam
+				delay := time.Duration(idx) * 250 * time.Millisecond
+				go func() {
+					if delay > 0 {
+						select {
+						case <-time.After(delay):
+						case <-ctxRace.Done():
+							return
+						}
+					}
+					ctx2 := ctxRace
+					var cancel context.CancelFunc
+					if !isStream {
+						ctx2, cancel = context.WithTimeout(ctxRace, upstreamTimeout)
+						defer cancel()
+					}
+					resp, err := p.doLocal(ctx2, fam, r, body)
+					select {
+					case ch <- raceRes{resp: resp, err: err, fam: fam}:
+					case <-ctxRace.Done():
+						if resp != nil && resp.Body != nil {
+							resp.Body.Close()
+						}
+					}
+				}()
+			}
+			var fails int
+			for fails < 2 {
+				select {
+				case res := <-ch:
+					if res.err != nil {
+						isTO := strings.Contains(res.err.Error(), "timeout") || strings.Contains(res.err.Error(), "deadline")
+						if isTO && p.cluster != nil && !p.cluster.ShouldFailover(0, true) {
+							lastErr = res.err
+							return nil, false
+						}
+						p.egress.markUnavailable(res.fam, isStackErrStatic(res.err))
+						lastErr = res.err
+						fails++
+						continue
+					}
+					shouldFail := p.cluster != nil && p.cluster.ShouldFailover(res.resp.StatusCode, false)
+					if shouldFail {
+						p.egress.markUnavailable(res.fam, false)
+						lastResp = res.resp
+						b, _ := io.ReadAll(res.resp.Body)
+						res.resp.Body.Close()
+						lastResp.Body = io.NopCloser(bytes.NewReader(b))
+						log.Printf("[failover] 本地 IPv%s 返回 %d 可 failover, 尝试对端转发", res.fam, res.resp.StatusCode)
+						fails++
+						if fails >= 2 {
+							return nil, false
+						}
+						continue
+					}
+					p.egress.markAvailable(res.fam)
+					cancelRace()
+					go func() {
+						for i := fails + 1; i < 2; i++ {
+							select {
+							case r2 := <-ch:
+								if r2.resp != nil && r2.resp.Body != nil {
+									r2.resp.Body.Close()
+								}
+							case <-time.After(2 * time.Second):
+								return
+							}
+						}
+					}()
+					return res.resp, true
+				case <-ctx.Done():
+					lastErr = ctx.Err()
+					return nil, false
+				}
+			}
+			return nil, false
+		}
 		for _, fam := range order {
 			if p.egress.isUnavailable(fam) {
 				continue

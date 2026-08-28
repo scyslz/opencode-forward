@@ -1,4 +1,4 @@
-package main
+package egress
 
 import (
 	"context"
@@ -10,9 +10,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"opencode-zen-proxy/internal/util"
 )
 
-func makeResolver(dnsServer string) *net.Resolver {
+func MakeResolver(dnsServer string) *net.Resolver {
 	if dnsServer == "" {
 		return net.DefaultResolver
 	}
@@ -26,11 +28,11 @@ func makeResolver(dnsServer string) *net.Resolver {
 }
 
 const (
-	unavailableCool     = 30 * time.Second
-	maxUnavailableCool  = 10 * time.Minute
+	UnavailableCool    = 30 * time.Second
+	MaxUnavailableCool = 10 * time.Minute
 )
 
-type ipProbe struct {
+type IPProbe struct {
 	mu       sync.Mutex
 	mode     string
 	url      string
@@ -40,23 +42,23 @@ type ipProbe struct {
 	failCount int
 }
 
-func newIPProbe(mode, url string, t *http.Transport, interval time.Duration) *ipProbe {
-	return &ipProbe{mode: mode, url: url, trans: t, interval: interval}
+func newIPProbe(mode, url string, t *http.Transport, interval time.Duration) *IPProbe {
+	return &IPProbe{mode: mode, url: url, trans: t, interval: interval}
 }
 
-func (p *ipProbe) currentIP() string {
+func (p *IPProbe) CurrentIP() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.current
 }
 
-func (p *ipProbe) setIP(ip string) {
+func (p *IPProbe) setIP(ip string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.current = ip
 }
 
-func (p *ipProbe) probe() (string, error) {
+func (p *IPProbe) probe() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.url, nil)
@@ -76,7 +78,7 @@ func (p *ipProbe) probe() (string, error) {
 	return ip, nil
 }
 
-func (p *ipProbe) refresh() {
+func (p *IPProbe) refresh() {
 	ip, err := p.probe()
 	if err != nil {
 		p.mu.Lock()
@@ -94,7 +96,7 @@ func (p *ipProbe) refresh() {
 	p.mu.Unlock()
 }
 
-func (p *ipProbe) run() {
+func (p *IPProbe) run() {
 	ticker := time.NewTicker(p.interval)
 	defer ticker.Stop()
 	for range ticker.C {
@@ -108,9 +110,9 @@ func (p *ipProbe) run() {
 			if shift > 30 {
 				shift = 30
 			}
-			d := unavailableCool * time.Duration(1<<uint(shift))
-			if d > maxUnavailableCool {
-				d = maxUnavailableCool
+			d := UnavailableCool * time.Duration(1<<uint(shift))
+			if d > MaxUnavailableCool {
+				d = MaxUnavailableCool
 			}
 			ticker.Reset(d)
 			continue
@@ -159,21 +161,21 @@ func makeDialContext(mode string, resolver *net.Resolver) func(ctx context.Conte
 	}
 }
 
-type egressManager struct {
-	transports  map[string]*http.Transport
-	probes      map[string]*ipProbe
-	egressPrefer string
+type Manager struct {
+	transports   map[string]*http.Transport
+	Probes       map[string]*IPProbe
+	EgressPrefer string
 
-	stackDown   map[string]bool
-	stackMu     sync.Mutex
-	unavail     map[string]time.Time
-	unavailMu   sync.Mutex
+	stackDown map[string]bool
+	stackMu   sync.Mutex
+	unavail   map[string]time.Time
+	unavailMu sync.Mutex
 }
 
-func newEgressManager(prefer string, probeURL4, probeURL6 string, interval time.Duration, resolver *net.Resolver) *egressManager {
+func NewManager(prefer string, probeURL4, probeURL6 string, interval time.Duration, resolver *net.Resolver) *Manager {
 	transports := map[string]*http.Transport{
-		"4": {DialContext: makeDialContext("4", resolver), ForceAttemptHTTP2: true, MaxIdleConns: 100, MaxIdleConnsPerHost: 100, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second},
-		"6": {DialContext: makeDialContext("6", resolver), ForceAttemptHTTP2: true, MaxIdleConns: 100, MaxIdleConnsPerHost: 100, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second},
+		"4": {DialContext: makeDialContext("4", resolver), ForceAttemptHTTP2: true, MaxIdleConns: 100, MaxIdleConnsPerHost: 100, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: util.UpstreamTimeout},
+		"6": {DialContext: makeDialContext("6", resolver), ForceAttemptHTTP2: true, MaxIdleConns: 100, MaxIdleConnsPerHost: 100, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: util.UpstreamTimeout},
 	}
 	if probeURL4 == "" {
 		probeURL4 = "https://api.ipify.org"
@@ -183,7 +185,7 @@ func newEgressManager(prefer string, probeURL4, probeURL6 string, interval time.
 	}
 	p4 := newIPProbe("4", probeURL4, transports["4"], interval)
 	p6 := newIPProbe("6", probeURL6, transports["6"], interval)
-	for _, p := range []*ipProbe{p4, p6} {
+	for _, p := range []*IPProbe{p4, p6} {
 		if ip, err := p.probe(); err != nil {
 			log.Printf("警告: IPv%s 启动探测出口IP失败, 命名空间退化为家族(%s), 后台自动重试: %v", p.mode, p.mode, err)
 		} else {
@@ -192,16 +194,16 @@ func newEgressManager(prefer string, probeURL4, probeURL6 string, interval time.
 		}
 		go p.run()
 	}
-	m := &egressManager{
+	m := &Manager{
 		transports:   transports,
-		probes:       map[string]*ipProbe{"4": p4, "6": p6},
-		egressPrefer: prefer,
+		Probes:       map[string]*IPProbe{"4": p4, "6": p6},
+		EgressPrefer: prefer,
 		stackDown:    map[string]bool{},
 		unavail:      map[string]time.Time{},
 	}
-	for _, p := range []*ipProbe{p4, p6} {
-		if p.currentIP() == "" {
-			if _, err := p.probe(); err != nil && isStackErrStatic(err) {
+	for _, p := range []*IPProbe{p4, p6} {
+		if p.CurrentIP() == "" {
+			if _, err := p.probe(); err != nil && util.IsStackErrStatic(err) {
 				m.stackDown[p.mode] = true
 				log.Printf("[egress] IPv%s 网络栈不可用, 已标记栈不可用(仅由探测恢复, 不重试)", p.mode)
 			}
@@ -211,12 +213,12 @@ func newEgressManager(prefer string, probeURL4, probeURL6 string, interval time.
 	return m
 }
 
-func (m *egressManager) recoverLoop() {
+func (m *Manager) recoverLoop() {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for range t.C {
-		for _, p := range m.probes {
-			if p.currentIP() != "" {
+		for _, p := range m.Probes {
+			if p.CurrentIP() != "" {
 				m.stackMu.Lock()
 				if m.stackDown[p.mode] {
 					delete(m.stackDown, p.mode)
@@ -230,46 +232,54 @@ func (m *egressManager) recoverLoop() {
 	}
 }
 
-func (m *egressManager) nsKey(fam string) string {
-	if ip := m.probes[fam].currentIP(); ip != "" {
+func (m *Manager) NsKey(fam string) string {
+	if ip := m.Probes[fam].CurrentIP(); ip != "" {
 		return fam + "|" + ip
 	}
 	return fam
 }
 
-func (m *egressManager) markStackDown(fam string, down bool) {
+func (m *Manager) MarkStackDown(fam string, down bool) {
 	m.stackMu.Lock()
-	m.stackDown[fam] = down
-	if !down {
+	prev := m.stackDown[fam]
+	if down {
+		m.stackDown[fam] = true
+	} else {
+		if !prev {
+			m.stackMu.Unlock()
+			return
+		}
 		delete(m.stackDown, fam)
 	}
 	m.stackMu.Unlock()
 	if down {
-		log.Printf("[egress] IPv%s 网络栈不可用, 已标记栈不可用(仅由探测恢复, 不重试)", fam)
+		if !prev {
+			log.Printf("[egress] IPv%s 网络栈不可用, 已标记栈不可用(仅由探测恢复, 不重试)", fam)
+		}
 	} else {
 		log.Printf("[egress] IPv%s 网络栈已恢复", fam)
 	}
 }
 
-func (m *egressManager) isStackDown(fam string) bool {
+func (m *Manager) IsStackDown(fam string) bool {
 	m.stackMu.Lock()
 	defer m.stackMu.Unlock()
 	return m.stackDown[fam]
 }
 
-func (m *egressManager) markUnavailable(fam string, isStack bool) {
+func (m *Manager) MarkUnavailable(fam string, isStack bool) {
 	if isStack {
-		m.markStackDown(fam, true)
+		m.MarkStackDown(fam, true)
 		return
 	}
 	m.unavailMu.Lock()
-	m.unavail[fam] = time.Now().Add(unavailableCool)
+	m.unavail[fam] = time.Now().Add(UnavailableCool)
 	m.unavailMu.Unlock()
-	log.Printf("[egress] IPv%s 标记不可用 %s", fam, unavailableCool)
+	log.Printf("[egress] IPv%s 标记不可用 %s", fam, UnavailableCool)
 }
 
-func (m *egressManager) isUnavailable(fam string) bool {
-	if m.isStackDown(fam) {
+func (m *Manager) IsUnavailable(fam string) bool {
+	if m.IsStackDown(fam) {
 		return true
 	}
 	m.unavailMu.Lock()
@@ -283,14 +293,14 @@ func (m *egressManager) isUnavailable(fam string) bool {
 	return false
 }
 
-func (m *egressManager) markAvailable(fam string) {
+func (m *Manager) MarkAvailable(fam string) {
 	m.unavailMu.Lock()
 	delete(m.unavail, fam)
 	m.unavailMu.Unlock()
-	m.markStackDown(fam, false)
+	m.MarkStackDown(fam, false)
 }
 
-func (m *egressManager) egressOrder(r *http.Request) []string {
+func (m *Manager) EgressOrder(r *http.Request) []string {
 	if v := r.Header.Get("X-Egress"); v == "4" || v == "6" {
 		other := "6"
 		if v == "6" {
@@ -298,16 +308,16 @@ func (m *egressManager) egressOrder(r *http.Request) []string {
 		}
 		return []string{v, other}
 	}
-	switch m.egressPrefer {
+	switch m.EgressPrefer {
 	case "d4":
 		return []string{"4"}
 	case "d6":
 		return []string{"6"}
 	case "auto":
-		if m.isUnavailable("6") && !m.isUnavailable("4") {
+		if m.IsUnavailable("6") && !m.IsUnavailable("4") {
 			return []string{"4", "6"}
 		}
-		if m.isUnavailable("4") && !m.isUnavailable("6") {
+		if m.IsUnavailable("4") && !m.IsUnavailable("6") {
 			return []string{"6", "4"}
 		}
 		return []string{"6", "4"}
@@ -317,6 +327,6 @@ func (m *egressManager) egressOrder(r *http.Request) []string {
 	return []string{"6", "4"}
 }
 
-func (m *egressManager) transport(fam string) *http.Transport {
+func (m *Manager) Transport(fam string) *http.Transport {
 	return m.transports[fam]
 }

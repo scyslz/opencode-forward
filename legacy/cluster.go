@@ -57,6 +57,7 @@ type clusterPeer struct {
 	Addr    string `json:"addr"`
 	WSSAddr string `json:"wss_addr,omitempty"`
 	RTTms   int64  `json:"rtt_ms"`
+	NodeID  string `json:"node_id,omitempty"`
 	Dynamic bool   `json:"-"`
 }
 
@@ -105,6 +106,7 @@ type clusterWireFrame struct {
 	Done       bool                 `json:"done,omitempty"`
 	Stream     bool                 `json:"stream,omitempty"`
 	AuthToken  string               `json:"auth_token,omitempty"`
+	NodeID     string               `json:"node_id,omitempty"`
 }
 
 type connWriter struct {
@@ -112,6 +114,7 @@ type connWriter struct {
 	ch   chan []byte
 	done chan struct{}
 	mu   sync.Mutex
+	once sync.Once
 }
 
 type clusterNode struct {
@@ -334,7 +337,7 @@ func (n *clusterNode) removeWriter(c net.Conn) {
 	if v, ok := n.connWriters.Load(key); ok {
 		cw := v.(*connWriter)
 		n.connWriters.Delete(key)
-		close(cw.ch)
+		cw.once.Do(func() { close(cw.ch) })
 	}
 }
 
@@ -352,6 +355,164 @@ func (n *clusterNode) writeConn(c net.Conn, data []byte) error {
 		case <-time.After(5 * time.Second):
 			return fmt.Errorf("conn write queue full")
 		}
+	}
+}
+
+func (n *clusterNode) dispatchFrame(c net.Conn, isWS bool, head, body []byte, tunnelID string) {
+	var wf clusterWireFrame
+	if err := json.Unmarshal(head, &wf); err != nil {
+		return
+	}
+	if wf.IsChunk || wf.Done {
+		if tunnelID != "" {
+			n.tunnels.heartbeat(tunnelID)
+		}
+		n.deliverChunk(wf.ID, wf.Chunk, wf.Done, wf.StatusCode, wf.Header)
+		return
+	}
+	if wf.StatusCode != nil {
+		if wf.BodyLen > 0 && !isWS {
+			b := make([]byte, wf.BodyLen)
+			if _, err := io.ReadFull(c, b); err != nil {
+				return
+			}
+			body = b
+		}
+		if tunnelID != "" {
+			n.tunnels.heartbeat(tunnelID)
+		}
+		n.deliverPending(wf.ID, wf.StatusCode, wf.Header, body)
+		return
+	}
+	if tunnelID != "" {
+		n.tunnels.heartbeat(tunnelID)
+	}
+	if wf.Path == clusterPingPath {
+		if wf.StatusCode == nil {
+			respBody := []byte("pong")
+			rf := clusterRespFrame{ID: wf.ID, StatusCode: 200, Header: map[string][]string{}, BodyLen: int64(len(respBody))}
+			rfb, _ := json.Marshal(rf)
+			var rlb [4]byte
+			binary.BigEndian.PutUint32(rlb[:], uint32(len(rfb)))
+			packed := make([]byte, 0, 4+len(rfb)+len(respBody))
+			packed = append(packed, rlb[:]...)
+			packed = append(packed, rfb...)
+			packed = append(packed, respBody...)
+			_ = n.writeConn(c, packed)
+		}
+		return
+	}
+	h := clusterFrameHeader{
+		ID:      wf.ID,
+		Method:  wf.Method,
+		Path:    wf.Path,
+		Headers: wf.Headers,
+		Visited: wf.Visited,
+		Hop:     wf.Hop,
+		Egress:  wf.Egress,
+		BodyLen: wf.BodyLen,
+	}
+	visited := append([]string(nil), h.Visited...)
+	visited = append(visited, n.selfID)
+	h.Visited = visited
+	u, _ := url.Parse(h.Path)
+	if u == nil || u.Path == "" {
+		u = &url.URL{Path: "/"}
+	}
+	fwdReq := &http.Request{Method: h.Method, URL: u, Header: http.Header{}}
+	for k, v := range h.Headers {
+		fwdReq.Header.Set(k, v)
+	}
+	fwdReq.Header.Set(clusterHdrVisited, strings.Join(h.Visited, ","))
+	fwdReq.Header.Set(clusterHdrHop, fmt.Sprintf("%d", h.Hop))
+	fwdReq.Header.Set(clusterHdrToken, n.cfg.Token)
+	fwdReq.Header.Set(clusterHdrEgress, h.Egress)
+	var reqBody []byte
+	if h.BodyLen > 0 {
+		reqBody = body
+	}
+	fwdReq.Body = io.NopCloser(bytes.NewReader(reqBody))
+	fwdReq.ContentLength = h.BodyLen
+	var resp *http.Response
+	var ferr error
+	if n.onForward == nil {
+		log.Printf("[cluster] 服务端未配置转发器, 丢弃帧 id=%s method=%s path=%s", h.ID, h.Method, h.Path)
+		ferr = fmt.Errorf("服务端未配置转发器, 无法处理集群帧")
+	} else {
+		log.Printf("[cluster] 转发请求 id=%s method=%s path=%s headers=%v stream=%v", h.ID, fwdReq.Method, fwdReq.URL.RequestURI(), fwdReq.Header, wf.Stream)
+		resp, ferr = n.onForward(fwdReq)
+	}
+	if wf.Stream && resp != nil && ferr == nil && resp.StatusCode == 200 && isSSEHeader(resp.Header) {
+		hdrs := cloneHeaderMap(resp.Header)
+		initFrame := clusterWireFrame{ID: h.ID, StatusCode: intPtr(200), Header: hdrs, IsChunk: false, Stream: true}
+		if err := n.writeConn(c, packFrame(initFrame, nil)); err != nil {
+			resp.Body.Close()
+			return
+		}
+		buf := make([]byte, 4096)
+		for {
+			nbytes, rerr := resp.Body.Read(buf)
+			if nbytes > 0 {
+				chunk := make([]byte, nbytes)
+				copy(chunk, buf[:nbytes])
+				cf := clusterWireFrame{ID: h.ID, IsChunk: true, Chunk: chunk}
+				if werr := n.writeConn(c, packFrame(cf, nil)); werr != nil {
+					break
+				}
+			}
+			if rerr != nil {
+				break
+			}
+		}
+		resp.Body.Close()
+		doneFrame := clusterWireFrame{ID: h.ID, Done: true}
+		_ = n.writeConn(c, packFrame(doneFrame, nil))
+		return
+	}
+	var respBody []byte
+	if resp != nil && resp.Body != nil {
+		respBody, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+	}
+	var hdrs map[string][]string
+	if resp != nil {
+		hdrs = make(map[string][]string)
+		for k, vv := range resp.Header {
+			if len(vv) == 0 {
+				hdrs[k] = []string{}
+				continue
+			}
+			cp := make([]string, len(vv))
+			copy(cp, vv)
+			hdrs[k] = cp
+		}
+	}
+	rf := clusterRespFrame{
+		ID:         h.ID,
+		StatusCode: 502,
+		Header:     hdrs,
+		BodyLen:    int64(len(respBody)),
+	}
+	if ferr != nil {
+		rf.BodyLen = int64(len([]byte(ferr.Error())))
+	} else if resp != nil {
+		rf.StatusCode = resp.StatusCode
+	}
+	rfb, _ := json.Marshal(rf)
+	var rlb [4]byte
+	binary.BigEndian.PutUint32(rlb[:], uint32(len(rfb)))
+	var bodyOut []byte
+	if ferr != nil {
+		bodyOut = []byte(ferr.Error())
+	} else {
+		bodyOut = respBody
+	}
+	packed := make([]byte, 0, 4+len(rfb)+len(bodyOut))
+	packed = append(packed, rlb[:]...)
+	packed = append(packed, rfb...)
+	packed = append(packed, bodyOut...)
+	if err := n.writeConn(c, packed); err != nil {
+		return
 	}
 }
 
@@ -374,19 +535,31 @@ func (n *clusterNode) loopPeerTunnel(p *clusterPeer) {
 	for {
 		var c net.Conn
 		var err error
+		var peerNodeID string
 
 		// 自动判断 TCP 还是 WSS
 		if strings.HasPrefix(p.Addr, "wss://") || strings.HasPrefix(p.Addr, "ws://") {
-			c, err = n.dialWSS(p.Addr)
+			c, peerNodeID, err = n.dialWSS(p.Addr)
 		} else {
-			c, err = tls.Dial("tcp", p.Addr, n.tlsCfg)
+			c, err = tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", p.Addr, n.tlsCfg)
 			if err == nil {
-				if err = n.handshake(c, false); err != nil {
+				if peerNodeID, err = n.handshake(c, false); err != nil {
 					logThrottledf(p.Addr+"-tcp-handshake", 30*time.Second, "[cluster] TCP 握手 peer %s 失败: %v", p.Addr, err)
 					_ = c.Close()
 					time.Sleep(3 * time.Second)
 					continue
 				}
+			}
+		}
+		if err == nil {
+			if peerNodeID != "" {
+				n.mu.Lock()
+				if pp, ok := n.peers[p.ID]; ok {
+					pp.NodeID = peerNodeID
+				} else {
+					p.NodeID = peerNodeID
+				}
+				n.mu.Unlock()
 			}
 		}
 
@@ -410,20 +583,23 @@ func (n *clusterNode) loopPeerTunnel(p *clusterPeer) {
 	}
 }
 
-func (n *clusterNode) dialWSS(addr string) (net.Conn, error) {
+func (n *clusterNode) dialWSS(addr string) (net.Conn, string, error) {
 	dialer := websocket.Dialer{
-		TLSClientConfig: n.tlsCfg,
+		TLSClientConfig:  n.tlsCfg,
+		HandshakeTimeout: 10 * time.Second,
+		NetDialContext:   (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
 	}
 	ws, _, err := dialer.Dial(addr, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	c := &wsConnWrapper{conn: ws}
-	if err := n.handshake(c, true); err != nil {
+	if peerNodeID, err := n.handshake(c, true); err != nil {
 		_ = c.Close()
-		return nil, err
+		return nil, "", err
+	} else {
+		return c, peerNodeID, nil
 	}
-	return c, nil
 }
 
 	var wsUpgrader = websocket.Upgrader{
@@ -439,12 +615,23 @@ func (n *clusterNode) acceptLoop() {
 		remote := c.RemoteAddr().String()
 		log.Printf("[cluster] 收到入站连接: from=%s local=%s", remote, c.LocalAddr())
 
-		// 简单的 HTTP/WS 握手嗅探
+		// 简单的 HTTP/WS 握手嗅探 (Peek 限时, 防连接后不发数据的连接阻塞 acceptLoop)
 		br := bufio.NewReader(c)
-		peek, _ := br.Peek(4)
+		_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+		peek, perr := br.Peek(4)
+		_ = c.SetReadDeadline(time.Time{})
+		if perr != nil {
+			_ = c.Close()
+			continue
+		}
 		if len(peek) >= 3 && string(peek[:3]) == "GET" {
+			peersMu := &n.mu
+			peersMap := n.peers
+			inboundMap := &n.inboundConns
 			go func(c net.Conn, br *bufio.Reader) {
+				_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
 				req, _ := http.ReadRequest(br)
+				_ = c.SetReadDeadline(time.Time{})
 				if req == nil {
 					c.Close()
 					return
@@ -456,9 +643,24 @@ func (n *clusterNode) acceptLoop() {
 					return
 				}
 				conn := &wsConnWrapper{conn: ws}
-				if err := n.verifyHandshake(conn, true); err != nil {
-					log.Printf("[cluster] WSS 握手被拒: from=%s err=%v", remote, err)
+				peerNodeID, vErr := n.verifyHandshake(conn, true)
+				if vErr != nil {
+					log.Printf("[cluster] WSS 握手被拒: from=%s err=%v", remote, vErr)
 					_ = conn.Close()
+					return
+				}
+				if peerNodeID != "" {
+					peersMu.Lock()
+					wsID := c.RemoteAddr().String()
+					peersMap[wsID] = &clusterPeer{ID: wsID, Addr: wsID, RTTms: 9999, NodeID: peerNodeID, Dynamic: true}
+					peersMu.Unlock()
+					tid := "ws-" + randomHex(4)
+					n.tunnels.open(tid, "inbound", peerNodeID, wsID, conn.LocalAddr().String())
+					n.handleConn(conn, true, tid)
+					peersMu.Lock()
+					delete(peersMap, wsID)
+					peersMu.Unlock()
+					inboundMap.Delete(wsID)
 					return
 				}
 				n.handleConn(conn, true, "ws-"+randomHex(4))
@@ -487,22 +689,25 @@ func (n *clusterNode) handleRawConn(c net.Conn, onDone func(net.Conn, string)) {
 		underlying = tcw.Conn
 	}
 	if tlsConn, ok := underlying.(*tls.Conn); ok {
+		_ = c.SetDeadline(time.Now().Add(10 * time.Second))
 		if hErr := tlsConn.Handshake(); hErr != nil {
 			log.Printf("[cluster] 接受连接 TLS握手失败: %v", hErr)
 			_ = c.Close()
 			return
 		}
+		_ = c.SetDeadline(time.Time{})
 	}
-	if err := n.verifyHandshake(c, false); err != nil {
+	peerNodeID, err := n.verifyHandshake(c, false)
+	if err != nil {
 		log.Printf("[cluster] 匿名裸TCP 连接被拒绝: %v (from %s)", err, remote)
 		_ = c.Close()
 		return
 	}
 	tid := "in-" + randomHex(4)
 	n.tunnels.open(tid, "inbound", "", remote, local)
-	log.Printf("[cluster] 接受隧道连接: id=%s remote=%s local=%s (服务端日志)", tid, remote, local)
+	log.Printf("[cluster] 接受隧道连接: id=%s remote=%s local=%s peerID=%s (服务端日志)", tid, remote, local, peerNodeID)
 	n.mu.Lock()
-	n.peers[remote] = &clusterPeer{ID: remote, Addr: remote, RTTms: 9999, Dynamic: true}
+	n.peers[remote] = &clusterPeer{ID: remote, Addr: remote, RTTms: 9999, NodeID: peerNodeID, Dynamic: true}
 	n.mu.Unlock()
 	n.inboundConns.Store(remote, c)
 	onDone(c, tid)
@@ -531,9 +736,9 @@ func (w *wsConnWrapper) Write(b []byte) (int, error) {
 func (w *wsConnWrapper) Close() error               { return w.conn.Close() }
 func (w *wsConnWrapper) LocalAddr() net.Addr       { return w.conn.LocalAddr() }
 func (w *wsConnWrapper) RemoteAddr() net.Addr      { return w.conn.RemoteAddr() }
-func (w *wsConnWrapper) SetDeadline(t time.Time) error      { return nil }
-func (w *wsConnWrapper) SetReadDeadline(t time.Time) error  { return nil }
-func (w *wsConnWrapper) SetWriteDeadline(t time.Time) error { return nil }
+func (w *wsConnWrapper) SetDeadline(t time.Time) error      { return w.conn.UnderlyingConn().SetDeadline(t) }
+func (w *wsConnWrapper) SetReadDeadline(t time.Time) error  { return w.conn.UnderlyingConn().SetReadDeadline(t) }
+func (w *wsConnWrapper) SetWriteDeadline(t time.Time) error { return w.conn.UnderlyingConn().SetWriteDeadline(t) }
 
 type tcpConnWrapper struct {
 	net.Conn
@@ -542,8 +747,8 @@ type tcpConnWrapper struct {
 
 func (t *tcpConnWrapper) Read(b []byte) (int, error) { return t.Reader.Read(b) }
 
-func (n *clusterNode) handshake(c net.Conn, isWS bool) error {
-	frame := clusterWireFrame{AuthToken: n.cfg.Token}
+func (n *clusterNode) handshake(c net.Conn, isWS bool) (string, error) {
+	frame := clusterWireFrame{AuthToken: n.cfg.Token, NodeID: n.selfID}
 	b, _ := json.Marshal(frame)
 	var lb [4]byte
 	binary.BigEndian.PutUint32(lb[:], uint32(len(b)))
@@ -556,102 +761,108 @@ func (n *clusterNode) handshake(c net.Conn, isWS bool) error {
 			_, data, rerr := c.(*wsConnWrapper).conn.ReadMessage()
 			_ = c.SetReadDeadline(time.Time{})
 			if rerr != nil {
-				return rerr
+				return "", rerr
 			}
 			if len(data) < 4 {
-				return fmt.Errorf("握手响应长度非法")
+				return "", fmt.Errorf("握手响应长度非法")
 			}
 			hl := binary.BigEndian.Uint32(data[:4])
 			if hl == 0 || hl > 1<<10 || int(hl)+4 > len(data) {
-				return fmt.Errorf("握手响应长度非法")
+				return "", fmt.Errorf("握手响应长度非法")
 			}
 			var resp clusterWireFrame
 			if err2 := json.Unmarshal(data[4:4+hl], &resp); err2 != nil {
-				return err2
+				return "", err2
 			}
 			if resp.AuthToken != "ok" {
-				return fmt.Errorf("握手被拒: %s", resp.AuthToken)
+				return "", fmt.Errorf("握手被拒: %s", resp.AuthToken)
 			}
-			return nil
+			return resp.NodeID, nil
 		}
-		return err
+		return "", err
 	}
 	if err = c.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		return err
+		return "", err
 	}
 	if _, err = c.Write(framed); err != nil {
-		return err
+		return "", err
 	}
 	_ = c.SetWriteDeadline(time.Time{})
 	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
 	var l int32
 	if err = binary.Read(c, binary.BigEndian, &l); err != nil {
-		return err
+		return "", err
 	}
 	if l <= 0 || l > 1<<10 {
-		return fmt.Errorf("握手响应长度非法")
+		return "", fmt.Errorf("握手响应长度非法")
 	}
 	rb := make([]byte, l)
 	if _, err = io.ReadFull(c, rb); err != nil {
-		return err
+		return "", err
 	}
 	_ = c.SetReadDeadline(time.Time{})
 	var resp clusterWireFrame
 	if err = json.Unmarshal(rb, &resp); err != nil {
-		return err
+		return "", err
 	}
 	if resp.AuthToken != "ok" {
-		return fmt.Errorf("握手被拒: %s", resp.AuthToken)
+		return "", fmt.Errorf("握手被拒: %s", resp.AuthToken)
 	}
-	return nil
+	return resp.NodeID, nil
 }
 
-func (n *clusterNode) verifyHandshake(c net.Conn, isWS bool) error {
+func (n *clusterNode) verifyHandshake(c net.Conn, isWS bool) (string, error) {
 	if isWS {
 		_ = c.SetReadDeadline(time.Now().Add(8 * time.Second))
 		_, data, err := c.(*wsConnWrapper).conn.ReadMessage()
 		if err != nil {
-			return err
+			return "", err
 		}
 		if len(data) < 4 {
-			return fmt.Errorf("握手长度非法")
+			return "", fmt.Errorf("握手长度非法")
 		}
 		hl := binary.BigEndian.Uint32(data[:4])
 		if hl == 0 || hl > 1<<10 || int(hl)+4 > len(data) {
-			return fmt.Errorf("握手长度非法")
+			return "", fmt.Errorf("握手长度非法")
 		}
 		var wf clusterWireFrame
 		if err := json.Unmarshal(data[4:4+hl], &wf); err != nil {
-			return err
+			return "", err
 		}
 		if !secureCompare(wf.AuthToken, n.cfg.Token) {
-			_ = n.writeHandshakeWS(c, clusterWireFrame{AuthToken: "unauthorized"})
-			return fmt.Errorf("token 不匹配")
+			_ = n.writeHandshakeWS(c, clusterWireFrame{AuthToken: "unauthorized", NodeID: n.selfID})
+			return "", fmt.Errorf("token 不匹配")
 		}
-		return n.writeHandshakeWS(c, clusterWireFrame{AuthToken: "ok"})
+		if err := n.writeHandshakeWS(c, clusterWireFrame{AuthToken: "ok", NodeID: n.selfID}); err != nil {
+			return "", err
+		}
+		return wf.NodeID, nil
 	}
 	_ = c.SetReadDeadline(time.Now().Add(8 * time.Second))
 	var l int32
 	if err := binary.Read(c, binary.BigEndian, &l); err != nil {
-		return err
+		return "", err
 	}
 	if l <= 0 || l > 1<<10 {
-		return fmt.Errorf("握手长度非法")
+		return "", fmt.Errorf("握手长度非法")
 	}
 	rb := make([]byte, l)
 	if _, err := io.ReadFull(c, rb); err != nil {
-		return err
+		return "", err
 	}
 	var wf clusterWireFrame
 	if err := json.Unmarshal(rb, &wf); err != nil {
-		return err
+		return "", err
 	}
 	if !secureCompare(wf.AuthToken, n.cfg.Token) {
-		fail := clusterWireFrame{AuthToken: "unauthorized"}
+		fail := clusterWireFrame{AuthToken: "unauthorized", NodeID: n.selfID}
 		_ = n.writeHandshakeTCP(c, fail)
-		return fmt.Errorf("token 不匹配")
+		return "", fmt.Errorf("token 不匹配")
 	}
-	return n.writeHandshakeTCP(c, clusterWireFrame{AuthToken: "ok"})
+	if err := n.writeHandshakeTCP(c, clusterWireFrame{AuthToken: "ok", NodeID: n.selfID}); err != nil {
+		return "", err
+	}
+	return wf.NodeID, nil
 }
 
 func (n *clusterNode) writeHandshakeWS(c net.Conn, wf clusterWireFrame) error {
@@ -697,11 +908,11 @@ func (n *clusterNode) joinLoop() {
 
 		// 根据前缀自动判断 TCP/WSS
 		if strings.HasPrefix(n.cfg.JoinAddr, "wss://") || strings.HasPrefix(n.cfg.JoinAddr, "ws://") {
-			c, err = n.dialWSS(n.cfg.JoinAddr)
+			c, _, err = n.dialWSS(n.cfg.JoinAddr)
 		} else {
-			tc, tcpErr := tls.Dial("tcp", cleanAddr(n.cfg.JoinAddr), n.tlsCfg)
+			tc, tcpErr := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", cleanAddr(n.cfg.JoinAddr), n.tlsCfg)
 			if tcpErr == nil {
-				if err = n.handshake(tc, false); err != nil {
+				if _, err = n.handshake(tc, false); err != nil {
 					log.Printf("[cluster] TCP Join %s 握手失败: %v", n.cfg.JoinAddr, err)
 					_ = tc.Close()
 					tcpErr = err
@@ -818,11 +1029,10 @@ func (n *clusterNode) handleConn(c net.Conn, isWS bool, tunnelID string) {
 	}()
 
 	for {
-		// 读取一个完整 Frame: [4字节长度][JSON head][body]
 		var head []byte
 		var body []byte
 		if isWS {
-			// WebSocket 模式：一个 Message 就是一个完整 Frame
+			_ = c.SetReadDeadline(time.Now().Add(upstreamTimeout))
 			ws := c.(*wsConnWrapper).conn
 			_, data, err := ws.ReadMessage()
 			if err != nil {
@@ -838,8 +1048,7 @@ func (n *clusterNode) handleConn(c net.Conn, isWS bool, tunnelID string) {
 			head = data[4 : 4+hl]
 			body = data[4+hl:]
 		} else {
-			// TCP 模式：从流中按长度解析
-			_ = c.SetReadDeadline(time.Now().Add(2 * n.keepAlive))
+			_ = c.SetReadDeadline(time.Now().Add(upstreamTimeout))
 			var l int32
 			if err := binary.Read(c, binary.BigEndian, &l); err != nil {
 				return
@@ -853,169 +1062,26 @@ func (n *clusterNode) handleConn(c net.Conn, isWS bool, tunnelID string) {
 			}
 		}
 
-		var wf clusterWireFrame
-		if err := json.Unmarshal(head, &wf); err != nil {
+		var peek clusterWireFrame
+		if err := json.Unmarshal(head, &peek); err != nil {
 			continue
 		}
-		if wf.IsChunk || wf.Done {
-			if tunnelID != "" {
-				n.tunnels.heartbeat(tunnelID)
-			}
-			n.deliverChunk(wf.ID, wf.Chunk, wf.Done, wf.StatusCode, wf.Header)
+		if peek.IsChunk || peek.Done || peek.StatusCode != nil || peek.Path == clusterPingPath {
+			n.dispatchFrame(c, isWS, head, body, tunnelID)
 			continue
 		}
-		if wf.StatusCode != nil {
-			if wf.BodyLen > 0 && !isWS {
-				// TCP 模式需要从流中读取 body
-				b := make([]byte, wf.BodyLen)
-				if _, err := io.ReadFull(c, b); err != nil {
-					return
-				}
-				body = b
-			}
-			if tunnelID != "" {
-				n.tunnels.heartbeat(tunnelID)
-			}
-			n.deliverPending(wf.ID, wf.StatusCode, wf.Header, body)
-			continue
-		}
-		if tunnelID != "" {
-			n.tunnels.heartbeat(tunnelID)
-		}
-		if wf.Path == clusterPingPath {
-			if wf.StatusCode == nil {
-				respBody := []byte("pong")
-				rf := clusterRespFrame{ID: wf.ID, StatusCode: 200, Header: map[string][]string{}, BodyLen: int64(len(respBody))}
-				rfb, _ := json.Marshal(rf)
-				var rlb [4]byte
-				binary.BigEndian.PutUint32(rlb[:], uint32(len(rfb)))
-				packed := make([]byte, 0, 4+len(rfb)+len(respBody))
-				packed = append(packed, rlb[:]...)
-				packed = append(packed, rfb...)
-				packed = append(packed, respBody...)
-				_ = n.writeConn(c, packed)
-			}
-			continue
-		}
-		h := clusterFrameHeader{
-			ID:      wf.ID,
-			Method:  wf.Method,
-			Path:    wf.Path,
-			Headers: wf.Headers,
-			Visited: wf.Visited,
-			Hop:     wf.Hop,
-			Egress:  wf.Egress,
-			BodyLen: wf.BodyLen,
-		}
-		visited := append([]string(nil), h.Visited...)
-		visited = append(visited, n.selfID)
-		h.Visited = visited
-		u, _ := url.Parse(h.Path)
-		if u == nil || u.Path == "" {
-			u = &url.URL{Path: "/"}
-		}
-		fwdReq := &http.Request{Method: h.Method, URL: u, Header: http.Header{}}
-		for k, v := range h.Headers {
-			fwdReq.Header.Set(k, v)
-		}
-		fwdReq.Header.Set(clusterHdrVisited, strings.Join(h.Visited, ","))
-		fwdReq.Header.Set(clusterHdrHop, fmt.Sprintf("%d", h.Hop))
-		fwdReq.Header.Set(clusterHdrToken, n.cfg.Token)
-		fwdReq.Header.Set(clusterHdrEgress, h.Egress)
-		var reqBody []byte
-		if h.BodyLen > 0 {
-			if isWS {
-				reqBody = body
-			} else {
-				reqBody = make([]byte, h.BodyLen)
-				if _, err := io.ReadFull(c, reqBody); err != nil {
-					continue
-				}
-			}
-		}
-		fwdReq.Body = io.NopCloser(bytes.NewReader(reqBody))
-		fwdReq.ContentLength = h.BodyLen
-		var resp *http.Response
-		var ferr error
-		if n.onForward == nil {
-			log.Printf("[cluster] 服务端未配置转发器, 丢弃帧 id=%s method=%s path=%s", h.ID, h.Method, h.Path)
-			ferr = fmt.Errorf("服务端未配置转发器, 无法处理集群帧")
-		} else {
-			log.Printf("[cluster] 转发请求 id=%s method=%s path=%s headers=%v stream=%v", h.ID, fwdReq.Method, fwdReq.URL.RequestURI(), fwdReq.Header, wf.Stream)
-			resp, ferr = n.onForward(fwdReq)
-		}
-		if wf.Stream && resp != nil && ferr == nil && resp.StatusCode == 200 && isSSEHeader(resp.Header) {
-			hdrs := cloneHeaderMap(resp.Header)
-			initFrame := clusterWireFrame{ID: h.ID, StatusCode: intPtr(200), Header: hdrs, IsChunk: false, Stream: true}
-			if err := n.writeConn(c, packFrame(initFrame, nil)); err != nil {
-				resp.Body.Close()
+		if peek.BodyLen > 0 && !isWS {
+			b := make([]byte, peek.BodyLen)
+			if _, err := io.ReadFull(c, b); err != nil {
 				return
 			}
-			buf := make([]byte, 4096)
-			for {
-				nbytes, rerr := resp.Body.Read(buf)
-				if nbytes > 0 {
-					chunk := make([]byte, nbytes)
-					copy(chunk, buf[:nbytes])
-					cf := clusterWireFrame{ID: h.ID, IsChunk: true, Chunk: chunk}
-					if werr := n.writeConn(c, packFrame(cf, nil)); werr != nil {
-						break
-					}
-				}
-				if rerr != nil {
-					break
-				}
-			}
-			resp.Body.Close()
-			doneFrame := clusterWireFrame{ID: h.ID, Done: true}
-			_ = n.writeConn(c, packFrame(doneFrame, nil))
-			continue
+			body = b
 		}
-		var respBody []byte
-		if resp != nil && resp.Body != nil {
-			respBody, _ = io.ReadAll(resp.Body)
-			resp.Body.Close()
-		}
-		var hdrs map[string][]string
-		if resp != nil {
-			hdrs = make(map[string][]string)
-			for k, vv := range resp.Header {
-				if len(vv) == 0 {
-					hdrs[k] = []string{}
-					continue
-				}
-				cp := make([]string, len(vv))
-				copy(cp, vv)
-				hdrs[k] = cp
-			}
-		}
-		rf := clusterRespFrame{
-			ID:         h.ID,
-			StatusCode: 502,
-			Header:     hdrs,
-			BodyLen:    int64(len(respBody)),
-		}
-		if ferr != nil {
-			rf.BodyLen = int64(len([]byte(ferr.Error())))
-		} else if resp != nil {
-			rf.StatusCode = resp.StatusCode
-		}
-		rfb, _ := json.Marshal(rf)
-		var rlb [4]byte
-		binary.BigEndian.PutUint32(rlb[:], uint32(len(rfb)))
-		var bodyOut []byte
-		if ferr != nil {
-			bodyOut = []byte(ferr.Error())
-		} else {
-			bodyOut = respBody
-		}
-		packed := make([]byte, 0, 4+len(rfb)+len(bodyOut))
-		packed = append(packed, rlb[:]...)
-		packed = append(packed, rfb...)
-		packed = append(packed, bodyOut...)
-		if err := n.writeConn(c, packed); err != nil {
-			return
-		}
+		headCopy := make([]byte, len(head))
+		copy(headCopy, head)
+		bodyCopy := make([]byte, len(body))
+		copy(bodyCopy, body)
+		go n.dispatchFrame(c, isWS, headCopy, bodyCopy, tunnelID)
 	}
 }
 
@@ -1033,6 +1099,9 @@ func (n *clusterNode) PickPeers(visited map[string]bool) []*clusterPeer {
 	var list []*clusterPeer
 	for _, p := range n.peers {
 		if visited[p.ID] {
+			continue
+		}
+		if p.NodeID != "" && visited[p.NodeID] {
 			continue
 		}
 		list = append(list, p)
@@ -1158,6 +1227,7 @@ func (n *clusterNode) forwardViaFrame(ctx context.Context, conn net.Conn, orig *
 		return nil, err
 	}
 
+	timeoutC := time.After(upstreamTimeout)
 	select {
 	case pr := <-ch:
 		if pr.err != nil {
@@ -1179,6 +1249,9 @@ func (n *clusterNode) forwardViaFrame(ctx context.Context, conn net.Conn, orig *
 								return buildStaticResponse(pr), nil
 							}
 							return buildStreamResponse(pr.rf, streamCh, &first, cleanupPending), nil
+						case <-timeoutC:
+							cleanupPending()
+							return nil, fmt.Errorf("等待对端流式首包超时 (%s)", upstreamTimeout)
 						case <-ctx.Done():
 							cleanupPending()
 							return nil, ctx.Err()
@@ -1202,6 +1275,9 @@ func (n *clusterNode) forwardViaFrame(ctx context.Context, conn net.Conn, orig *
 		}
 		cleanupPending()
 		return buildStaticResponse(pr), nil
+	case <-timeoutC:
+		cleanupPending()
+		return nil, fmt.Errorf("等待对端响应超时 (%s)", upstreamTimeout)
 	case <-ctx.Done():
 		cleanupPending()
 		return nil, ctx.Err()

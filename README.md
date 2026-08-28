@@ -14,7 +14,7 @@ opencode-zen-proxy is a lightweight reverse proxy for `opencode.ai`. It provides
 ## Build
 
 ```bash
-go build -o opencode-zen-proxy .
+go build -o opencode-zen-proxy ./cmd/zen-proxy
 ```
 
 ## Configuration
@@ -72,8 +72,10 @@ Port conflict handling: if the port is held by an old instance of this binary it
 ### Build from source
 
 ```bash
-go build -o opencode-zen-proxy .
+go build -o opencode-zen-proxy ./cmd/zen-proxy
 OUTBOUND_AUTH="Bearer sk-..." ./start.sh start
+# or via scripts/
+go build -o opencode-zen-proxy ./cmd/zen-proxy && ./scripts/start.sh start
 ```
 
 ### Cluster
@@ -90,14 +92,27 @@ Private joiner:
 CLUSTER_JOIN=public:9443 CLUSTER_TOKEN=s3 ./start.sh start
 ```
 
-## Files
+## Project Layout (Standard Go)
 
-| File | Description |
+```
+cmd/zen-proxy/main.go          # entry, flag parsing, wiring
+internal/proxy/                # HTTP reverse proxy & failover
+internal/egress/               # dual-stack egress & probe
+internal/cluster/              # private TLS+frame cluster protocol
+internal/tunnel/               # tunnel persistence
+internal/util/                 # helpers, constants (UpstreamTimeout)
+scripts/start.sh               # service script (also ./start.sh shim)
+configs/opencode-zen-proxy.service # systemd unit
+legacy/                        # previous flat files (reference only)
+```
+
+| Path | Description |
 |---|---|
-| main.go | CLI args parsing & server |
-| proxy.go | HTTP reverse proxy & failover logic |
-| egress.go | dual-stack egress & probe manager |
-| cluster.go | private TLS+frame cluster protocol |
-| util.go | helpers |
-| start.sh | unified service script (interactive/non-interactive, start/stop/restart/status/run) |
-| opencode-zen-proxy.service | systemd unit |
+| cmd/zen-proxy/main.go | CLI args parsing & server |
+| internal/proxy | HTTP reverse proxy & failover logic |
+| internal/egress | dual-stack egress & probe manager |
+| internal/cluster | private TLS+frame cluster protocol |
+| internal/tunnel | tunnel persistence |
+| internal/util | helpers |
+| scripts/start.sh | unified service script |
+| configs/opencode-zen-proxy.service | systemd unit |
