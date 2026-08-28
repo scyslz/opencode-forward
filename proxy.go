@@ -210,7 +210,7 @@ type ClusterForwarder interface {
 	ShouldFailover(status int, isTimeout bool) bool
 	PickPeers(visited map[string]bool) []*clusterPeer
 	ForwardToPeer(ctx context.Context, peer *clusterPeer, orig *http.Request, body []byte, visited []string, hop int) (*http.Response, error)
-	ForwardCluster(ctx context.Context, r *http.Request, body []byte, visited []string, hop int) (*http.Response, error)
+	ForwardCluster(ctx context.Context, r *http.Request, body []byte) (*http.Response, error)
 	HandleHTTP(w http.ResponseWriter, r *http.Request) bool
 	IsInternalPath(p string) bool
 	SelfID() string
@@ -372,18 +372,12 @@ func (p *Proxy) DoClusterForward(r *http.Request) (*http.Response, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), upstreamTimeout)
 	defer cancel()
-	// 本地双栈按本地 egressPrefer 自决
 	if resp, err := p.tryLocalEgress(ctx, r, body); err == nil {
 		return resp, nil
 	} else if p.cluster == nil || !p.cluster.Enabled() {
 		return nil, err
 	} else {
-		// 本地失败，委托集群对象继续分发
-		if resp, err := p.forwardViaCluster(ctx, r, body, err); err == nil {
-			return resp, nil
-		} else {
-			return nil, err
-		}
+		return p.cluster.ForwardCluster(ctx, r, body)
 	}
 }
 
@@ -405,41 +399,6 @@ func (p *Proxy) tryLocalEgress(ctx context.Context, r *http.Request, body []byte
 		return nil, lastErr
 	}
 	return nil, fmt.Errorf("无可用 egress")
-}
-
-func (p *Proxy) forwardViaCluster(ctx context.Context, r *http.Request, body []byte, lastErr error) (*http.Response, error) {
-	visitedIn, hopIn := parseVisited(r)
-	if p.cluster == nil || !p.cluster.Enabled() {
-		if lastErr != nil {
-			return nil, lastErr
-		}
-		return nil, fmt.Errorf("无可用 egress")
-	}
-	visitedMap := map[string]bool{}
-	for _, v := range visitedIn {
-		visitedMap[strings.TrimSpace(v)] = true
-	}
-	if visitedMap[p.cluster.SelfID()] {
-		if lastErr != nil {
-			return nil, lastErr
-		}
-		return nil, fmt.Errorf("loop detected")
-	}
-	visited, hop := buildVisited(p.cluster.SelfID(), visitedIn, hopIn)
-	if hop > maxHop {
-		if lastErr != nil {
-			return nil, lastErr
-		}
-		return nil, fmt.Errorf("hop exceeded")
-	}
-	if resp, err := p.cluster.ForwardCluster(ctx, r, body, visited, hop); err == nil {
-		return resp, nil
-	} else {
-		if lastErr == nil {
-			lastErr = err
-		}
-		return nil, lastErr
-	}
 }
 
 // rewriteBodyModel 替换 JSON body 中的 "model" 字段; 非法 JSON 或无该字段时原样返回

@@ -1061,13 +1061,18 @@ func (n *clusterNode) ForwardToPeer(ctx context.Context, peer *clusterPeer, orig
 	return nil, fmt.Errorf("no tls tunnel to peer %s", peer.Addr)
 }
 
-func (n *clusterNode) ForwardCluster(ctx context.Context, r *http.Request, body []byte, visited []string, hop int) (*http.Response, error) {
+func (n *clusterNode) ForwardCluster(ctx context.Context, r *http.Request, body []byte) (*http.Response, error) {
+	visitedIn, hopIn := parseVisited(r)
+	visitedMap := map[string]bool{}
+	for _, v := range visitedIn {
+		visitedMap[strings.TrimSpace(v)] = true
+	}
+	if visitedMap[n.selfID] {
+		return nil, fmt.Errorf("loop detected")
+	}
+	visited, hop := buildVisited(n.selfID, visitedIn, hopIn)
 	if hop > maxHop {
 		return nil, fmt.Errorf("hop exceeded")
-	}
-	visitedMap := map[string]bool{}
-	for _, v := range visited {
-		visitedMap[strings.TrimSpace(v)] = true
 	}
 	visitedMap[n.selfID] = true
 	peers := n.PickPeers(visitedMap)
