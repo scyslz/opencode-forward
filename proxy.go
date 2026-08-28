@@ -397,7 +397,39 @@ func (p *Proxy) DoClusterForward(r *http.Request) (*http.Response, error) {
 			lastErr = err
 			continue
 		}
+		// 本地成功直接返回；即使 403/4xx 也不本地重试，交由上游判断
 		return resp, nil
+	}
+	// 本地双栈均失败，尝试集群转发由本节点继续分发
+	if p.cluster != nil && p.cluster.Enabled() {
+		visitedIn, hopIn := parseVisited(r)
+		visitedMap := map[string]bool{}
+		for _, v := range visitedIn {
+			visitedMap[strings.TrimSpace(v)] = true
+		}
+		if visitedMap[p.cluster.SelfID()] {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, fmt.Errorf("loop detected")
+		}
+		visited, hop := buildVisited(p.cluster.SelfID(), visitedIn, hopIn)
+		visitedMap[p.cluster.SelfID()] = true
+		if hop <= maxHop {
+			peers := p.cluster.PickPeers(visitedMap)
+			for _, peer := range peers {
+				if hop+1 > maxHop {
+					break
+				}
+				cloneReq := &http.Request{Method: r.Method, URL: r.URL, Header: r.Header.Clone()}
+				resp, err := p.cluster.ForwardToPeer(ctx, peer, cloneReq, body, visited, hop+1)
+				if err != nil {
+					lastErr = err
+					continue
+				}
+				return resp, nil
+			}
+		}
 	}
 	if lastErr != nil {
 		return nil, lastErr
