@@ -367,14 +367,40 @@ func (p *Proxy) DoClusterForward(r *http.Request) (*http.Response, error) {
 	if r.Body != nil {
 		body, _ = io.ReadAll(r.Body)
 	}
-	// 4/6 只管本地：远端由本节点自己决定，不透传调用方的 egress 偏好
-	egress := p.egress.egressPrefer
-	if egress == "auto" {
-		egress = "6"
+	// 4/6 只管本地：本节点按本地 egressPrefer 自决，双栈轮询
+	primary := p.egress.egressPrefer
+	if primary == "auto" {
+		primary = "6"
+	}
+	other := "4"
+	if primary == "4" {
+		other = "6"
+	}
+	order := []string{primary, other}
+	// d4/d6 强制单栈
+	if primary == "d4" {
+		order = []string{"4"}
+	} else if primary == "d6" {
+		order = []string{"6"}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	return p.doLocal(ctx, egress, r, body)
+	var lastErr error
+	for _, fam := range order {
+		if p.egress.isUnavailable(fam) && p.egress.isStackDown(fam) {
+			continue
+		}
+		resp, err := p.doLocal(ctx, fam, r, body)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return resp, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return p.doLocal(ctx, primary, r, body)
 }
 
 // rewriteBodyModel 替换 JSON body 中的 "model" 字段; 非法 JSON 或无该字段时原样返回
