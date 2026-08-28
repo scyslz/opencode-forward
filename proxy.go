@@ -367,43 +367,14 @@ func (p *Proxy) DoClusterForward(r *http.Request) (*http.Response, error) {
 	if r.Body != nil {
 		body, _ = io.ReadAll(r.Body)
 	}
-	egress := r.Header.Get(clusterHdrEgress)
-	if egress != "4" && egress != "6" {
-		egress = p.egress.egressPrefer
-		if egress == "auto" {
-			egress = "6"
-		}
+	// 4/6 只管本地：远端由本节点自己决定，不透传调用方的 egress 偏好
+	egress := p.egress.egressPrefer
+	if egress == "auto" {
+		egress = "6"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	resp, err := p.doLocal(ctx, egress, r, body)
-	if err != nil {
-		other := "4"
-		if egress == "4" {
-			other = "6"
-		}
-		if !p.egress.isUnavailable(other) {
-			if r2, err2 := p.doLocal(ctx, other, r, body); err2 == nil {
-				return r2, nil
-			}
-		}
-		return nil, err
-	}
-	if p.cluster != nil && p.cluster.ShouldFailover(resp.StatusCode, false) {
-		other := "4"
-		if egress == "4" {
-			other = "6"
-		}
-		if !p.egress.isUnavailable(other) {
-			resp.Body.Close()
-			if r2, err2 := p.doLocal(ctx, other, r, body); err2 == nil && !p.cluster.ShouldFailover(r2.StatusCode, false) {
-				return r2, nil
-			} else if err2 == nil {
-				resp = r2
-			}
-		}
-	}
-	return resp, nil
+	return p.doLocal(ctx, egress, r, body)
 }
 
 // rewriteBodyModel 替换 JSON body 中的 "model" 字段; 非法 JSON 或无该字段时原样返回
