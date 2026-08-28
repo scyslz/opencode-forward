@@ -402,7 +402,7 @@ func (p *Proxy) DoClusterForward(r *http.Request) (*http.Response, error) {
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return p.doLocal(ctx, primary, r, body)
+	return nil, fmt.Errorf("无可用 egress")
 }
 
 // rewriteBodyModel 替换 JSON body 中的 "model" 字段; 非法 JSON 或无该字段时原样返回
