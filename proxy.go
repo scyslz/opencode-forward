@@ -122,11 +122,26 @@ func isEmptySSE(data []byte) bool {
 		return true
 	}
 	s := string(data)
+	// chat.completions: 含 delta+content 即为有效
 	if strings.Contains(s, `"delta"`) && strings.Contains(s, `"content"`) {
 		return false
 	}
+	// responses API: response.output_text.delta / output_text / content[].text
+	if strings.Contains(s, "output_text.delta") || strings.Contains(s, `"output_text"`) || strings.Contains(s, `"output"`) {
+		// 若同时出现 delta 或 text 字段则视为非空
+		if strings.Contains(s, `"delta"`) || strings.Contains(s, `"text"`) {
+			return false
+		}
+	}
 	if strings.Contains(s, `"choices":[]`) || strings.Contains(s, `"choices": []`) {
 		if !strings.Contains(s, `"text"`) && !strings.Contains(s, `"content":"`) {
+			return true
+		}
+	}
+	// 纯 DONE 或空 choices 且无文本则为空
+	if strings.Contains(s, "data: [DONE]") {
+		trimmed := strings.TrimSpace(strings.ReplaceAll(s, "data: [DONE]", ""))
+		if trimmed == "" || trimmed == "data:" {
 			return true
 		}
 	}
@@ -135,6 +150,11 @@ func isEmptySSE(data []byte) bool {
 		return true
 	}
 	return false
+}
+
+func isResponsesPath(p string) bool {
+	p = strings.ToLower(p)
+	return strings.Contains(p, "/response")
 }
 
 func dumpRequest(r *http.Request, withBody bool) {
@@ -271,8 +291,39 @@ func passthroughHeader(k string) bool {
 	return false
 }
 
+func normalizeProxyPath(p string) string {
+	// 兼容单复数: /response -> /responses, 同时保留子路径如 /responses/xxx
+	if p == "/response" {
+		return "/responses"
+	}
+	if strings.HasPrefix(p, "/response/") {
+		return "/responses/" + strings.TrimPrefix(p, "/response/")
+	}
+	if p == "/v1/response" {
+		return "/v1/responses"
+	}
+	if strings.HasPrefix(p, "/v1/response/") {
+		return "/v1/responses/" + strings.TrimPrefix(p, "/v1/response/")
+	}
+	return p
+}
+
+func joinPathDedup(base, p string) string {
+	p = normalizeProxyPath(p)
+	joined := joinPath(base, p)
+	// 去重 /v1 前缀: base 已含 /v1 时, 客户端再带 /v1 会导致 /v1/v1
+	// 例如 base=/zen/v1, p=/v1/responses -> /zen/v1/responses 而非 /zen/v1/v1/responses
+	if strings.HasSuffix(strings.TrimSuffix(base, "/"), "/v1") {
+		joined = strings.ReplaceAll(joined, "/v1/v1/", "/v1/")
+		if strings.HasSuffix(joined, "/v1/v1") {
+			joined = strings.TrimSuffix(joined, "/v1") + "/v1"
+		}
+	}
+	return joined
+}
+
 func (p *Proxy) buildOutbound(in *http.Request, outSession string) *http.Request {
-	u := &url.URL{Scheme: p.cfg.scheme, Host: p.cfg.host, Path: joinPath(p.cfg.basePath, in.URL.Path), RawQuery: in.URL.RawQuery}
+	u := &url.URL{Scheme: p.cfg.scheme, Host: p.cfg.host, Path: joinPathDedup(p.cfg.basePath, in.URL.Path), RawQuery: in.URL.RawQuery}
 	out := &http.Request{
 		Method: in.Method,
 		URL:    u,
@@ -667,15 +718,64 @@ func (p *Proxy) responseLooksEmpty(resp *http.Response) bool {
 
 
 
+func extractContentForSSE(m map[string]any) (string, string) {
+	// 尝试 chat.completions: choices[0].message.content
+	if ch, ok := m["choices"].([]any); ok && len(ch) > 0 {
+		if c0, ok := ch[0].(map[string]any); ok {
+			if msg, ok := c0["message"].(map[string]any); ok {
+				if content, _ := msg["content"].(string); content != "" {
+					return content, "chat"
+				}
+			}
+			// 有些实现直接 choices[0].text
+			if t, _ := c0["text"].(string); t != "" {
+				return t, "chat"
+			}
+		}
+	}
+	// responses API: output[0].content[0].text  或 output_text 字段
+	if out, ok := m["output"].([]any); ok && len(out) > 0 {
+		for _, o := range out {
+			if om, ok := o.(map[string]any); ok {
+				if cont, ok := om["content"].([]any); ok {
+					for _, c := range cont {
+						if cm, ok := c.(map[string]any); ok {
+							if t, _ := cm["text"].(string); t != "" {
+								return t, "responses"
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if t, _ := m["output_text"].(string); t != "" {
+		return t, "responses"
+	}
+	// 兜底: 直接找 content 字符串
+	if t, _ := m["content"].(string); t != "" {
+		return t, "chat"
+	}
+	return "", ""
+}
+
 func (p *Proxy) retryAsNonStream(body []byte, order []string) *http.Response {
+	return p.retryAsNonStreamForPath(body, order, "/chat/completions")
+}
+
+func (p *Proxy) retryAsNonStreamForPath(body []byte, order []string, origPath string) *http.Response {
 	nb := rewriteStreamFalse(body)
+	targetPath := "/chat/completions"
+	if isResponsesPath(origPath) {
+		targetPath = "/responses"
+	}
 	var fixed *http.Response
 	for _, fam := range order {
 		if p.egress.isUnavailable(fam) {
 			continue
 		}
 		ctx2, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		tmpReq := &http.Request{Method: "POST", URL: mustParse("/chat/completions"), Header: http.Header{"Content-Type": []string{"application/json"}}}
+		tmpReq := &http.Request{Method: "POST", URL: mustParse(targetPath), Header: http.Header{"Content-Type": []string{"application/json"}}}
 		resp2, err2 := p.doLocal(ctx2, fam, tmpReq, nb)
 		cancel()
 		if err2 != nil {
@@ -694,25 +794,24 @@ func (p *Proxy) retryAsNonStream(body []byte, order []string) *http.Response {
 	fixed.Body.Close()
 	var m map[string]any
 	if json.Unmarshal(fb, &m) == nil {
-		if ch, ok := m["choices"].([]any); ok && len(ch) > 0 {
-			if c0, ok := ch[0].(map[string]any); ok {
-				if msg, ok := c0["message"].(map[string]any); ok {
-					content, _ := msg["content"].(string)
-					if content != "" {
-						id, _ := m["id"].(string)
-						if id == "" {
-							id = opencodeID("resp")
-						}
-						sse := fmt.Sprintf("data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":%s}}]}\n\ndata: [DONE]\n", id, mustJSONString(content))
-						fixed.Body = io.NopCloser(strings.NewReader(sse))
-						fixed.Header.Set("Content-Type", "text/event-stream")
-						fixed.Header.Set("Cache-Control", "no-cache")
-						fixed.Header.Del("Content-Length")
-						fixed.Header.Set("Transfer-Encoding", "chunked")
-						return fixed
-					}
-				}
+		if content, kind := extractContentForSSE(m); content != "" {
+			id, _ := m["id"].(string)
+			if id == "" {
+				id = opencodeID("resp")
 			}
+			var sse string
+			if kind == "responses" {
+				// responses API SSE: response.output_text.delta 事件
+				sse = fmt.Sprintf("data: {\"type\":\"response.output_text.delta\",\"delta\":%s,\"item_id\":\"%s\"}\n\ndata: [DONE]\n", mustJSONString(content), id)
+			} else {
+				sse = fmt.Sprintf("data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":%s}}]}\n\ndata: [DONE]\n", id, mustJSONString(content))
+			}
+			fixed.Body = io.NopCloser(strings.NewReader(sse))
+			fixed.Header.Set("Content-Type", "text/event-stream")
+			fixed.Header.Set("Cache-Control", "no-cache")
+			fixed.Header.Del("Content-Length")
+			fixed.Header.Set("Transfer-Encoding", "chunked")
+			return fixed
 		}
 	}
 	fixed.Body = io.NopCloser(bytes.NewReader(fb))
