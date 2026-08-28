@@ -1067,8 +1067,24 @@ func (n *clusterNode) ForwardCluster(ctx context.Context, r *http.Request, body 
 	for _, v := range visitedIn {
 		visitedMap[strings.TrimSpace(v)] = true
 	}
+	// 已访问过本节点则跳过本节点，直接选下一未访问 peer
 	if visitedMap[n.selfID] {
-		return nil, fmt.Errorf("loop detected")
+		peers := n.PickPeers(visitedMap)
+		var lastErr error
+		for _, peer := range peers {
+			if hopIn+1 > maxHop {
+				break
+			}
+			resp, err := n.ForwardToPeer(ctx, peer, r, body, visitedIn, hopIn+1)
+			if err == nil {
+				return resp, nil
+			}
+			lastErr = err
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("无可用 peer")
 	}
 	visited, hop := buildVisited(n.selfID, visitedIn, hopIn)
 	if hop > maxHop {

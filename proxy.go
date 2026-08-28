@@ -223,7 +223,7 @@ func newProxy(cfg proxyConfig, egress *egressManager, sess *sessionCache) *Proxy
 func (p *Proxy) SetCluster(c ClusterForwarder) {
 	p.cluster = c
 	if cn, ok := c.(*clusterNode); ok && cn != nil {
-		cn.SetForwarder(p.DoClusterForward)
+		cn.SetForwarder(p.handleClusterForward)
 	}
 }
 
@@ -366,13 +366,17 @@ func (p *Proxy) doLocal(ctx context.Context, fam string, in *http.Request, body 
 }
 
 func (p *Proxy) DoClusterForward(r *http.Request) (*http.Response, error) {
+	return p.handleClusterForward(r)
+}
+
+func (p *Proxy) handleClusterForward(r *http.Request) (*http.Response, error) {
 	var body []byte
 	if r.Body != nil {
 		body, _ = io.ReadAll(r.Body)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), upstreamTimeout)
 	defer cancel()
-	if resp, err := p.tryLocalEgress(ctx, r, body); err == nil {
+	if resp, err := p.tryLocal(ctx, r, body); err == nil {
 		return resp, nil
 	} else if p.cluster == nil || !p.cluster.Enabled() {
 		return nil, err
@@ -381,7 +385,7 @@ func (p *Proxy) DoClusterForward(r *http.Request) (*http.Response, error) {
 	}
 }
 
-func (p *Proxy) tryLocalEgress(ctx context.Context, r *http.Request, body []byte) (*http.Response, error) {
+func (p *Proxy) tryLocal(ctx context.Context, r *http.Request, body []byte) (*http.Response, error) {
 	order := p.egress.egressOrder(r)
 	// egressOrder 已处理 X-Egress/d4/d6/auto，这里仅去重不可用栈
 	var lastErr error
