@@ -18,6 +18,8 @@ import (
 	"time"
 )
 
+var upstreamTimeout = 300 * time.Second
+
 type sessionCache struct {
 	mu   sync.Mutex
 	path string
@@ -383,7 +385,7 @@ func (p *Proxy) DoClusterForward(r *http.Request) (*http.Response, error) {
 	} else if primary == "d6" {
 		order = []string{"6"}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), upstreamTimeout)
 	defer cancel()
 	var lastErr error
 	for _, fam := range order {
@@ -477,7 +479,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ctx2 := ctx
 			var cancel context.CancelFunc
 			if !isStreamRequest(body) {
-				ctx2, cancel = context.WithTimeout(ctx, 30*time.Second)
+				ctx2, cancel = context.WithTimeout(ctx, upstreamTimeout)
 			}
 			resp, err := p.doLocal(ctx2, fam, r, body)
 			if cancel != nil {
@@ -518,7 +520,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ctx2 := ctx
 			var cancel context.CancelFunc
 			if !isStreamRequest(body) {
-				ctx2, cancel = context.WithTimeout(ctx, 30*time.Second)
+				ctx2, cancel = context.WithTimeout(ctx, upstreamTimeout)
 			}
 			resp, err := p.doLocal(ctx2, fam, r, body)
 			if cancel != nil {
@@ -606,7 +608,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			peerCtx := r.Context()
 			var cancel context.CancelFunc
 			if !isStreamRequest(body) {
-				peerCtx, cancel = context.WithTimeout(r.Context(), 30*time.Second)
+				peerCtx, cancel = context.WithTimeout(r.Context(), upstreamTimeout)
 			}
 			cloneReq := &http.Request{Method: r.Method, URL: r.URL, Header: r.Header.Clone()}
 			resp, err := p.cluster.ForwardToPeer(peerCtx, peer, cloneReq, body, visited, hop+1)
