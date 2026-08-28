@@ -1061,6 +1061,33 @@ func (n *clusterNode) ForwardToPeer(ctx context.Context, peer *clusterPeer, orig
 	return nil, fmt.Errorf("no tls tunnel to peer %s", peer.Addr)
 }
 
+func (n *clusterNode) ForwardCluster(ctx context.Context, r *http.Request, body []byte, visited []string, hop int) (*http.Response, error) {
+	if hop > maxHop {
+		return nil, fmt.Errorf("hop exceeded")
+	}
+	visitedMap := map[string]bool{}
+	for _, v := range visited {
+		visitedMap[strings.TrimSpace(v)] = true
+	}
+	visitedMap[n.selfID] = true
+	peers := n.PickPeers(visitedMap)
+	var lastErr error
+	for _, peer := range peers {
+		if hop+1 > maxHop {
+			break
+		}
+		resp, err := n.ForwardToPeer(ctx, peer, r, body, visited, hop+1)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("无可用 peer")
+}
+
 func (n *clusterNode) forwardViaFrame(ctx context.Context, conn net.Conn, orig *http.Request, body []byte, visited []string, hop int) (*http.Response, error) {
 	reqID := "r-" + randomHex(8)
 	isStream := bytes.Contains(bytes.ToLower(body), []byte(`"stream":true`)) || bytes.Contains(body, []byte(`"stream": true`))

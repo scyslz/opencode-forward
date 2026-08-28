@@ -210,6 +210,7 @@ type ClusterForwarder interface {
 	ShouldFailover(status int, isTimeout bool) bool
 	PickPeers(visited map[string]bool) []*clusterPeer
 	ForwardToPeer(ctx context.Context, peer *clusterPeer, orig *http.Request, body []byte, visited []string, hop int) (*http.Response, error)
+	ForwardCluster(ctx context.Context, r *http.Request, body []byte, visited []string, hop int) (*http.Response, error)
 	HandleHTTP(w http.ResponseWriter, r *http.Request) bool
 	IsInternalPath(p string) bool
 	SelfID() string
@@ -408,6 +409,12 @@ func (p *Proxy) tryLocalEgress(ctx context.Context, r *http.Request, body []byte
 
 func (p *Proxy) forwardViaCluster(ctx context.Context, r *http.Request, body []byte, lastErr error) (*http.Response, error) {
 	visitedIn, hopIn := parseVisited(r)
+	if p.cluster == nil || !p.cluster.Enabled() {
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("无可用 egress")
+	}
 	visitedMap := map[string]bool{}
 	for _, v := range visitedIn {
 		visitedMap[strings.TrimSpace(v)] = true
@@ -419,29 +426,20 @@ func (p *Proxy) forwardViaCluster(ctx context.Context, r *http.Request, body []b
 		return nil, fmt.Errorf("loop detected")
 	}
 	visited, hop := buildVisited(p.cluster.SelfID(), visitedIn, hopIn)
-	visitedMap[p.cluster.SelfID()] = true
 	if hop > maxHop {
 		if lastErr != nil {
 			return nil, lastErr
 		}
 		return nil, fmt.Errorf("hop exceeded")
 	}
-	peers := p.cluster.PickPeers(visitedMap)
-	for _, peer := range peers {
-		if hop+1 > maxHop {
-			break
-		}
-		cloneReq := &http.Request{Method: r.Method, URL: r.URL, Header: r.Header.Clone()}
-		if resp, err := p.cluster.ForwardToPeer(ctx, peer, cloneReq, body, visited, hop+1); err == nil {
-			return resp, nil
-		} else {
+	if resp, err := p.cluster.ForwardCluster(ctx, r, body, visited, hop); err == nil {
+		return resp, nil
+	} else {
+		if lastErr == nil {
 			lastErr = err
 		}
-	}
-	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, fmt.Errorf("无可用 egress")
 }
 
 // rewriteBodyModel 替换 JSON body 中的 "model" 字段; 非法 JSON 或无该字段时原样返回
