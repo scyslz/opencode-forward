@@ -119,11 +119,14 @@ func (p *IPProbe) run() {
 		p.mu.Unlock()
 		if fc > 0 {
 			shift := fc - 1
-			if shift > 30 {
-				shift = 30
+			if shift > 10 {
+				shift = 10
 			}
 			d := UnavailableCool * time.Duration(1<<uint(shift))
 			if d > MaxUnavailableCool {
+				d = MaxUnavailableCool
+			}
+			if d < UnavailableCool {
 				d = MaxUnavailableCool
 			}
 			ticker.Reset(d)
@@ -327,7 +330,11 @@ func (m *Manager) MarkUnavailable(fam string, isStack bool) {
 	m.unavailMu.Lock()
 	c := m.unavailCount[fam] + 1
 	m.unavailCount[fam] = c
-	d := UnavailableCool * time.Duration(1<<uint(c-1))
+	shift := c - 1
+	if shift > 10 {
+		shift = 10
+	}
+	d := UnavailableCool * time.Duration(1<<uint(shift))
 	if d > MaxUnavailableCool {
 		d = MaxUnavailableCool
 	}

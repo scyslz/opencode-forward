@@ -881,7 +881,11 @@ func (n *Node) joinLoop() {
 		if err != nil {
 			if isAuthErr(err) {
 				authFails++
-				d := 10 * time.Second * time.Duration(1<<uint(authFails-1))
+				shift := authFails - 1
+				if shift > 10 {
+					shift = 10
+				}
+				d := 10 * time.Second * time.Duration(1<<uint(shift))
 				if d > 3*time.Minute {
 					d = 3 * time.Minute
 				}
