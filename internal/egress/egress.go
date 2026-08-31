@@ -184,7 +184,7 @@ type Manager struct {
 	unavailMu sync.Mutex
 }
 
-func NewManager(prefer, probeURL4, probeURL6 string, interval time.Duration, resolver *net.Resolver, proxyURL string) *Manager {
+func NewManager(prefer, probeURL4, probeURL6 string, interval time.Duration, resolver *net.Resolver, proxyURL string, proxyInterval time.Duration) *Manager {
 	m := &Manager{
 		transports:   map[string]*http.Transport{},
 		Probes:       map[string]*IPProbe{},
@@ -211,7 +211,10 @@ func NewManager(prefer, probeURL4, probeURL6 string, interval time.Duration, res
 			if probeURL4 == "" {
 				probeURL4 = "https://api.ipify.org"
 			}
-			pp := newIPProbe("px", probeURL4, pxt, interval)
+			if proxyInterval <= 0 {
+				proxyInterval = 30 * time.Second
+			}
+			pp := newIPProbe("px", probeURL4, pxt, proxyInterval)
 			m.Probes["px"] = pp
 			if ip, err := pp.probe(); err != nil {
 				log.Printf("警告: proxy 启动探测出口IP失败, 命名空间退化为px, 后台自动重试: %v", err)

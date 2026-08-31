@@ -10,7 +10,7 @@
 set -u
 
 REPO="scyslz/opencode-forward"
-TAG="${ZEN_VERSION:-v1.18.26}"
+TAG="${ZEN_VERSION:-v1.18.27}"
 SELF="$(readlink -f "$0")"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$DIR/opencode-zen-proxy"
@@ -24,10 +24,11 @@ CLUSTER_JOIN="${CLUSTER_JOIN:-}"
 PEERS="${PEERS:-}"
 FAILOVER_ON="${FAILOVER_ON:-429,502,503,504,timeout}"
 IP_INTERVAL="${IP_INTERVAL:-5m}"
+PROXY_PROBE_INTERVAL="${PROXY_PROBE_INTERVAL:-30s}"
 IP_URL="${IP_URL:-}"
 DUMP="${DUMP:-0}"
 VERBOSE="${VERBOSE:-0}"
-USER_AGENT="${USER_AGENT:-opencode/1.18.26 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14}"
+USER_AGENT="${USER_AGENT:-opencode/1.18.27 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14}"
 X_OPENCODE_CLIENT="${X_OPENCODE_CLIENT:-cli}"
 X_OPENCODE_PROJECT="${X_OPENCODE_PROJECT:-global}"
 LOG_DIR="${LOG_DIR:-$DIR/logs}"
@@ -66,14 +67,15 @@ ensure_binary() {
 ask() { # $1=var name $2=prompt $3=default -> stdout
     local env="$1" p="$2" d="$3" v=""
     eval "v=\"\${$env:-}\""
-    [ -n "$v" ] && { echo "$v"; return; }
-    if [ -t 0 ]; then
-        printf '%s [%s]: ' "$p" "$d" >&2
-        read -r v || v=""
-        echo "${v:-$d}"
-    else
+    if [ ! -t 0 ]; then
+        [ -n "$v" ] && { echo "$v"; return; }
         echo "$d"
+        return
     fi
+    local def="${v:-$d}"
+    printf '%s [%s]: ' "$p" "$def" >&2
+    read -r v || v=""
+    echo "${v:-$def}"
 }
 if [ -t 0 ]; then
     echo "== opencode-zen-proxy setup (Enter = default) =="
@@ -156,6 +158,7 @@ build_args() {
     [ "$DUMP" = "1" ]           && a+=(--dump)
     [ -n "$IP_URL" ]            && a+=(--ip-url "$IP_URL")
     a+=(--ip-interval "$IP_INTERVAL")
+    [ -n "$PROXY" ]             && a+=(--proxy-probe-interval "$PROXY_PROBE_INTERVAL")
     eval "a+=($EXTRA_ARGS)"
     printf '%s\n' "${a[@]}"
 }

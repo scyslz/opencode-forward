@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	version          = "1.18.26"
+	version          = "1.18.27"
 	defaultUserAgent = "opencode/" + version + " ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 	defaultClient    = "cli"
 	defaultProject   = "global"
@@ -35,7 +35,7 @@ func usage() {
 
 自动注入的开源 CLI 特征头:
   Authorization:      Bearer <token>       --outbound-auth 注入并覆盖客户端授权
-  User-Agent:         opencode/1.18.26 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14
+  User-Agent:         opencode/1.18.27 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14
   x-opencode-client:  cli              固定
   x-opencode-project: global           一般固定
   x-opencode-session: ses_xxx          会话映射/缓存
@@ -62,6 +62,7 @@ func usage() {
   --ip-interval <dur>  出口IP探测周期, 如 5m (默认 5m)
   --ip-url <url>       出口IP探测服务 (默认 IPv4: https://api.ipify.org, IPv6: https://api6.ipify.org)
   --proxy <url>        经代理出口, http/https/socks5/socks5h, 如 socks5://127.0.0.1:1080 (优先代理, 不区分4/6)
+  --proxy-probe-interval <dur>  代理出口IP探测周期, 默认 30s
   --egress-prefer <4|6|auto>  本机出口优先级, 默认 6 (6→4; auto为并发HappyEyeballs) (别名 --prefer)
   --cluster-id <id>    集群节点ID (默认随机)
   --cluster-token <t>  集群鉴权token (常量时间比较)
@@ -111,6 +112,7 @@ func main() {
 	cacheFile := ""
 	rewriteModel := ""
 	probeInterval := 5 * time.Minute
+	proxyProbeInterval := 30 * time.Second
 	probeURL4 := ""
 	probeURL6 := ""
 	dnsServer := ""
@@ -168,6 +170,16 @@ func main() {
 				i++
 				proxyURL = extraArgs[i]
 			}
+		case arg == "--proxy-probe-interval":
+			if i+1 < len(extraArgs) {
+				i++
+				dur, err := time.ParseDuration(extraArgs[i])
+				if err != nil || dur <= 0 {
+					fmt.Fprintf(os.Stderr, "错误: --proxy-probe-interval 需要合法时长, 如 30s")
+					os.Exit(1)
+				}
+				proxyProbeInterval = dur
+			}
 		case arg == "--ip-url":
 			if i+1 < len(extraArgs) {
 				i++
@@ -220,7 +232,7 @@ func main() {
 	}
 
 	resolver := egress.MakeResolver(dnsServer)
-	egressMgr := egress.NewManager(egressPrefer, probeURL4, probeURL6, probeInterval, resolver, proxyURL)
+	egressMgr := egress.NewManager(egressPrefer, probeURL4, probeURL6, probeInterval, resolver, proxyURL, proxyProbeInterval)
 	sess := proxy.NewSessionCache(cacheFile)
 	clusterNode := cluster.NewNode(clusterCfg)
 
@@ -283,7 +295,11 @@ func main() {
 			egressDesc = "并发竞速 HappyEyeballs (IPv4/IPv6 并发, 快者胜)"
 		}
 	}
-	log.Printf("  出口策略: %s (X-Egress 头可覆盖) | 失败冷却 %s | 探测间隔 %s", egressDesc, egress.UnavailableCool, probeInterval)
+	if proxyURL != "" {
+		log.Printf("  出口策略: %s (X-Egress 头可覆盖) | 失败冷却 %s | 代理探测间隔 %s | 直连探测间隔 %s", egressDesc, egress.UnavailableCool, proxyProbeInterval, probeInterval)
+	} else {
+		log.Printf("  出口策略: %s (X-Egress 头可覆盖) | 失败冷却 %s | 探测间隔 %s", egressDesc, egress.UnavailableCool, probeInterval)
+	}
 	if clusterCfg.JoinAddr != "" || clusterCfg.ListenAddr != "" || len(clusterCfg.Peers) > 0 {
 		log.Printf("  集群兜底: 双栈均失败时转发至对端 (join=%s listen=%s)", clusterCfg.JoinAddr, clusterCfg.ListenAddr)
 	} else {
@@ -328,9 +344,9 @@ log.Printf("  特征头: User-Agent=%s client=%s project=%s outbound-auth=%s", d
 	if proxyURL != "" {
 		if p := egressMgr.Probes["px"]; p != nil {
 			if ip := p.CurrentIP(); ip != "" {
-				log.Printf("  代理出口IP探测: %s (每 %s), 当前=%s 命名空间=%s", probeURL4, probeInterval, ip, egressMgr.NsKey("px"))
+				log.Printf("  代理出口IP探测: %s (每 %s), 当前=%s 命名空间=%s", probeURL4, proxyProbeInterval, ip, egressMgr.NsKey("px"))
 			} else {
-				log.Printf("  代理出口IP探测: %s (每 %s), 未知(退化为px, 后台重试中)", probeURL4, probeInterval)
+				log.Printf("  代理出口IP探测: %s (每 %s), 未知(退化为px, 后台重试中)", probeURL4, proxyProbeInterval)
 			}
 		}
 	}
