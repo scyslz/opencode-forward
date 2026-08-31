@@ -61,6 +61,7 @@ func usage() {
   --xff                追加 X-Forwarded-For
   --ip-interval <dur>  出口IP探测周期, 如 5m (默认 5m)
   --ip-url <url>       出口IP探测服务 (默认 IPv4: https://api.ipify.org, IPv6: https://api6.ipify.org)
+  --proxy <url>        经代理出口, http/https/socks5/socks5h, 如 socks5://127.0.0.1:1080 (优先代理, 不区分4/6)
   --egress-prefer <4|6|auto>  本机出口优先级, 默认 6 (6→4; auto为并发HappyEyeballs) (别名 --prefer)
   --cluster-id <id>    集群节点ID (默认随机)
   --cluster-token <t>  集群鉴权token (常量时间比较)
@@ -113,6 +114,7 @@ func main() {
 	probeURL4 := ""
 	probeURL6 := ""
 	dnsServer := ""
+	proxyURL := ""
 	var extraHeaders []string
 	var defaults = map[string]string{
 		"User-Agent":         defaultUserAgent,
@@ -160,6 +162,11 @@ func main() {
 			if i+1 < len(extraArgs) {
 				i++
 				dnsServer = extraArgs[i]
+			}
+		case arg == "--proxy":
+			if i+1 < len(extraArgs) {
+				i++
+				proxyURL = extraArgs[i]
 			}
 		case arg == "--ip-url":
 			if i+1 < len(extraArgs) {
@@ -213,7 +220,7 @@ func main() {
 	}
 
 	resolver := egress.MakeResolver(dnsServer)
-	egressMgr := egress.NewManager(egressPrefer, probeURL4, probeURL6, probeInterval, resolver)
+	egressMgr := egress.NewManager(egressPrefer, probeURL4, probeURL6, probeInterval, resolver, proxyURL)
 	sess := proxy.NewSessionCache(cacheFile)
 	clusterNode := cluster.NewNode(clusterCfg)
 
@@ -260,17 +267,21 @@ func main() {
 	log.Printf("  监听: %s (单端口同时接受 IPv4/IPv6)", ln.Addr())
 	log.Printf("  后端: %s//%s  基础路径: %s", scheme, host, basePath)
 	var egressDesc string
-	switch egressPrefer {
-	case "d4":
-		egressDesc = "强制 IPv4 (无回退)"
-	case "d6":
-		egressDesc = "强制 IPv6 (无回退)"
-	case "4":
-		egressDesc = "优先 IPv4, 失败回退 IPv6"
-	case "6":
-		egressDesc = "优先 IPv6, 失败回退 IPv4"
-	case "auto":
-		egressDesc = "并发竞速 HappyEyeballs (IPv4/IPv6 并发, 快者胜)"
+	if proxyURL != "" {
+		egressDesc = "代理出口 (优先代理, 不区分 4/6)"
+	} else {
+		switch egressPrefer {
+		case "d4":
+			egressDesc = "强制 IPv4 (无回退)"
+		case "d6":
+			egressDesc = "强制 IPv6 (无回退)"
+		case "4":
+			egressDesc = "优先 IPv4, 失败回退 IPv6"
+		case "6":
+			egressDesc = "优先 IPv6, 失败回退 IPv4"
+		case "auto":
+			egressDesc = "并发竞速 HappyEyeballs (IPv4/IPv6 并发, 快者胜)"
+		}
 	}
 	log.Printf("  出口策略: %s (X-Egress 头可覆盖) | 失败冷却 %s | 探测间隔 %s", egressDesc, egress.UnavailableCool, probeInterval)
 	if clusterCfg.JoinAddr != "" || clusterCfg.ListenAddr != "" || len(clusterCfg.Peers) > 0 {
@@ -305,10 +316,22 @@ log.Printf("  特征头: User-Agent=%s client=%s project=%s outbound-auth=%s", d
 				u = "https://api6.ipify.org"
 			}
 		}
+		if p == nil {
+			continue
+		}
 		if ip := p.CurrentIP(); ip != "" {
 			log.Printf("  出口IP探测[%s]: %s (每 %s), 当前=%s 命名空间=%s", fam, u, probeInterval, ip, egressMgr.NsKey(fam))
 		} else {
 			log.Printf("  出口IP探测[%s]: %s (每 %s), 未知(退化为%s, 后台重试中)", fam, u, probeInterval, fam)
+		}
+	}
+	if proxyURL != "" {
+		if p := egressMgr.Probes["px"]; p != nil {
+			if ip := p.CurrentIP(); ip != "" {
+				log.Printf("  代理出口IP探测: %s (每 %s), 当前=%s 命名空间=%s", probeURL4, probeInterval, ip, egressMgr.NsKey("px"))
+			} else {
+				log.Printf("  代理出口IP探测: %s (每 %s), 未知(退化为px, 后台重试中)", probeURL4, probeInterval)
+			}
 		}
 	}
 	if cacheFile != "" {

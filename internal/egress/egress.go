@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -67,15 +68,26 @@ func (p *IPProbe) probe() (string, error) {
 	}
 	resp, err := p.trans.RoundTrip(req)
 	if err != nil {
-		return "", fmt.Errorf("IPv%s 网络栈不可用 (连接 %s 失败): %w", p.mode, p.url, err)
+		return "", fmt.Errorf("%s 网络栈不可用 (连接 %s 失败): %w", famLabel(p.mode), p.url, err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64))
 	ip := strings.TrimSpace(string(body))
 	if net.ParseIP(ip) == nil {
-		return "", fmt.Errorf("IPv%s 探测响应无有效 IP: %q", p.mode, body)
+		return "", fmt.Errorf("%s 探测响应无有效 IP: %q", famLabel(p.mode), body)
 	}
 	return ip, nil
+}
+
+func famLabel(mode string) string {
+	switch mode {
+	case "4":
+		return "IPv4"
+	case "6":
+		return "IPv6"
+	default:
+		return "proxy"
+	}
 }
 
 func (p *IPProbe) refresh() {
@@ -84,12 +96,12 @@ func (p *IPProbe) refresh() {
 		p.mu.Lock()
 		p.failCount++
 		p.mu.Unlock()
-		log.Printf("[ip-probe] IPv%s 探测失败: %v", p.mode, err)
+		log.Printf("[ip-probe] %s 探测失败: %v", famLabel(p.mode), err)
 		return
 	}
 	p.mu.Lock()
 	if p.current != ip {
-		log.Printf("[ip-probe] IPv%s 出口IP变化: %q -> %q", p.mode, p.current, ip)
+		log.Printf("[ip-probe] %s 出口IP变化: %q -> %q", famLabel(p.mode), p.current, ip)
 		p.failCount = 0
 	}
 	p.current = ip
@@ -172,11 +184,52 @@ type Manager struct {
 	unavailMu sync.Mutex
 }
 
-func NewManager(prefer string, probeURL4, probeURL6 string, interval time.Duration, resolver *net.Resolver) *Manager {
+func NewManager(prefer, probeURL4, probeURL6 string, interval time.Duration, resolver *net.Resolver, proxyURL string) *Manager {
+	m := &Manager{
+		transports:   map[string]*http.Transport{},
+		Probes:       map[string]*IPProbe{},
+		EgressPrefer: prefer,
+		stackDown:    map[string]bool{},
+		unavail:      map[string]time.Time{},
+	}
+	if proxyURL != "" {
+		u, err := url.Parse(proxyURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5" && u.Scheme != "socks5h") {
+			log.Printf("[egress] 代理 URL 非法 (%s), 忽略, 退回直连", proxyURL)
+		} else {
+			pxt := &http.Transport{
+				Proxy:                 http.ProxyURL(u),
+				DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				ForceAttemptHTTP2:     true,
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   100,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: util.UpstreamTimeout,
+			}
+			m.transports["px"] = pxt
+			if probeURL4 == "" {
+				probeURL4 = "https://api.ipify.org"
+			}
+			pp := newIPProbe("px", probeURL4, pxt, interval)
+			m.Probes["px"] = pp
+			if ip, err := pp.probe(); err != nil {
+				log.Printf("警告: proxy 启动探测出口IP失败, 命名空间退化为px, 后台自动重试: %v", err)
+			} else {
+				log.Printf("[ip-probe] proxy 启动检测成功, 当前出口IP=%s", ip)
+				pp.setIP(ip)
+			}
+			go pp.run()
+			go m.recoverLoop()
+			log.Printf("[egress] 已启用代理出口: %s (优先代理, 不区分 4/6)", u.Redacted())
+			return m
+		}
+	}
 	transports := map[string]*http.Transport{
 		"4": {DialContext: makeDialContext("4", resolver), ForceAttemptHTTP2: true, MaxIdleConns: 100, MaxIdleConnsPerHost: 100, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: util.UpstreamTimeout},
 		"6": {DialContext: makeDialContext("6", resolver), ForceAttemptHTTP2: true, MaxIdleConns: 100, MaxIdleConnsPerHost: 100, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: util.UpstreamTimeout},
 	}
+	m.transports = transports
 	if probeURL4 == "" {
 		probeURL4 = "https://api.ipify.org"
 	}
@@ -187,25 +240,19 @@ func NewManager(prefer string, probeURL4, probeURL6 string, interval time.Durati
 	p6 := newIPProbe("6", probeURL6, transports["6"], interval)
 	for _, p := range []*IPProbe{p4, p6} {
 		if ip, err := p.probe(); err != nil {
-			log.Printf("警告: IPv%s 启动探测出口IP失败, 命名空间退化为家族(%s), 后台自动重试: %v", p.mode, p.mode, err)
+			log.Printf("警告: %s 启动探测出口IP失败, 命名空间退化为家族(%s), 后台自动重试: %v", famLabel(p.mode), p.mode, err)
 		} else {
-			log.Printf("[ip-probe] IPv%s 启动检测成功, 当前出口IP=%s", p.mode, ip)
+			log.Printf("[ip-probe] %s 启动检测成功, 当前出口IP=%s", famLabel(p.mode), ip)
 			p.setIP(ip)
 		}
 		go p.run()
 	}
-	m := &Manager{
-		transports:   transports,
-		Probes:       map[string]*IPProbe{"4": p4, "6": p6},
-		EgressPrefer: prefer,
-		stackDown:    map[string]bool{},
-		unavail:      map[string]time.Time{},
-	}
+	m.Probes = map[string]*IPProbe{"4": p4, "6": p6}
 	for _, p := range []*IPProbe{p4, p6} {
 		if p.CurrentIP() == "" {
 			if _, err := p.probe(); err != nil && util.IsStackErrStatic(err) {
 				m.stackDown[p.mode] = true
-				log.Printf("[egress] IPv%s 网络栈不可用, 已标记栈不可用(仅由探测恢复, 不重试)", p.mode)
+				log.Printf("[egress] %s 网络栈不可用, 已标记栈不可用(仅由探测恢复, 不重试)", famLabel(p.mode))
 			}
 		}
 	}
@@ -254,10 +301,10 @@ func (m *Manager) MarkStackDown(fam string, down bool) {
 	m.stackMu.Unlock()
 	if down {
 		if !prev {
-			log.Printf("[egress] IPv%s 网络栈不可用, 已标记栈不可用(仅由探测恢复, 不重试)", fam)
+			log.Printf("[egress] %s 网络栈不可用, 已标记栈不可用(仅由探测恢复, 不重试)", famLabel(fam))
 		}
 	} else {
-		log.Printf("[egress] IPv%s 网络栈已恢复", fam)
+		log.Printf("[egress] %s 网络栈已恢复", famLabel(fam))
 	}
 }
 
@@ -275,7 +322,7 @@ func (m *Manager) MarkUnavailable(fam string, isStack bool) {
 	m.unavailMu.Lock()
 	m.unavail[fam] = time.Now().Add(UnavailableCool)
 	m.unavailMu.Unlock()
-	log.Printf("[egress] IPv%s 标记不可用 %s", fam, UnavailableCool)
+	log.Printf("[egress] %s 标记不可用 %s", famLabel(fam), UnavailableCool)
 }
 
 func (m *Manager) IsUnavailable(fam string) bool {
@@ -301,6 +348,9 @@ func (m *Manager) MarkAvailable(fam string) {
 }
 
 func (m *Manager) EgressOrder(r *http.Request) []string {
+	if _, ok := m.transports["px"]; ok {
+		return []string{"px"}
+	}
 	if v := r.Header.Get("X-Egress"); v == "4" || v == "6" {
 		other := "6"
 		if v == "6" {

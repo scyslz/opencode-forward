@@ -38,6 +38,7 @@ PORT="${PORT:-9000}"
 INBOUND_AUTH="${INBOUND_AUTH:-}"
 DNS_SERVER="${DNS_SERVER:-}"
 MODEL="${MODEL:-}"
+PROXY="${PROXY:-}"
 CLUSTER_TOKEN="${CLUSTER_TOKEN:-}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
@@ -90,6 +91,7 @@ if [ -t 0 ]; then
     if [ -n "$CLUSTER_LISTEN" ] || [ -n "$CLUSTER_JOIN" ]; then
         CLUSTER_TOKEN="$(ask CLUSTER_TOKEN 'Cluster token' "$CLUSTER_TOKEN")"
     fi
+    PROXY="$(ask PROXY 'Proxy URL (http/socks5, empty=off)' "$PROXY")"
 fi
 if [ -n "$CLUSTER_LISTEN" ] && [ -n "$CLUSTER_JOIN" ]; then
     echo "Warning: CLUSTER_LISTEN ($CLUSTER_LISTEN) set, ignoring CLUSTER_JOIN ($CLUSTER_JOIN) (mutually exclusive)" >&2
@@ -119,7 +121,7 @@ trim_args() {
     local out="" tok
     for tok in "$@"; do
         case "$tok" in
-            --cluster-token|--outbound-auth|--inbound-auth) out+=" $tok ****" ;;
+            --cluster-token|--outbound-auth|--inbound-auth|--proxy) out+=" $tok ****" ;;
             *" "*|*"'"*|*'"'*) out+=" '$tok'" ;;
             *) out+=" $tok" ;;
         esac
@@ -135,6 +137,7 @@ build_args() {
     [ "$FWD_INBOUND" = "1" ]    && a+=(-F)
     [ -n "$MODEL" ]             && a+=(--model "$MODEL")
     [ -n "$DNS_SERVER" ]        && a+=(--dns-server "$DNS_SERVER")
+    [ -n "$PROXY" ]             && a+=(--proxy "$PROXY")
     [ -n "$CLUSTER_TOKEN" ]     && a+=(--cluster-token "$CLUSTER_TOKEN")
     [ -n "$CLUSTER_LISTEN" ]    && a+=(--cluster-listen "$CLUSTER_LISTEN")
     [ -n "$CLUSTER_JOIN" ]      && a+=(--cluster-join "$CLUSTER_JOIN")
@@ -226,7 +229,7 @@ egress_human() {
 
 summary() {
     echo "listen :$PORT  backend $BACKEND"
-    echo "egress: $(egress_human)  model rewrite: ${MODEL:-off}  cluster: ${CLUSTER_JOIN:-${CLUSTER_LISTEN:-off}}"
+    echo "egress: $(egress_human)  proxy: ${PROXY:-off}  model rewrite: ${MODEL:-off}  cluster: ${CLUSTER_JOIN:-${CLUSTER_LISTEN:-off}}"
     [ -n "$INBOUND_AUTH" ] && echo "inbound auth: enabled"
 }
 
