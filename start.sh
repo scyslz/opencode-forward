@@ -10,7 +10,7 @@
 set -u
 
 REPO="scyslz/opencode-forward"
-TAG="${ZEN_VERSION:-v1.18.27}"
+TAG="${ZEN_VERSION:-v1.18.28}"
 SELF="$(readlink -f "$0")"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$DIR/opencode-zen-proxy"
@@ -28,7 +28,7 @@ PROXY_PROBE_INTERVAL="${PROXY_PROBE_INTERVAL:-30s}"
 IP_URL="${IP_URL:-}"
 DUMP="${DUMP:-0}"
 VERBOSE="${VERBOSE:-0}"
-USER_AGENT="${USER_AGENT:-opencode/1.18.27 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14}"
+USER_AGENT="${USER_AGENT:-opencode/1.18.28 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14}"
 X_OPENCODE_CLIENT="${X_OPENCODE_CLIENT:-cli}"
 X_OPENCODE_PROJECT="${X_OPENCODE_PROJECT:-global}"
 LOG_DIR="${LOG_DIR:-$DIR/logs}"
@@ -77,7 +77,12 @@ ask() { # $1=var name $2=prompt $3=default -> stdout
     read -r v || v=""
     echo "${v:-$def}"
 }
-if [ -t 0 ]; then
+_cmd="${1:-start}"
+case "$_cmd" in
+    stop|status) _interactive=0 ;;
+    *) _interactive=1 ;;
+esac
+if [ -t 0 ] && [ "$_interactive" = 1 ]; then
     echo "== opencode-zen-proxy setup (Enter = default) =="
     PORT="$(ask PORT 'Listen port' '9003')"
     EGRESS_PREFER="$(ask EGRESS_PREFER 'Egress prefer (6/4/d4/d6/auto)' '6')"
