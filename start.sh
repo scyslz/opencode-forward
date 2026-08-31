@@ -10,7 +10,7 @@
 set -u
 
 REPO="scyslz/opencode-forward"
-TAG="${ZEN_VERSION:-v1.18.29}"
+TAG="${ZEN_VERSION:-v1.18.30}"
 SELF="$(readlink -f "$0")"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$DIR/opencode-zen-proxy"
@@ -21,7 +21,6 @@ FWD_INBOUND="${FWD_INBOUND:-0}"
 EGRESS_PREFER="${PREFER:-${EGRESS_PREFER:-6}}"
 CLUSTER_LISTEN="${CLUSTER_LISTEN:-}"
 CLUSTER_JOIN="${CLUSTER_JOIN:-}"
-PEERS="${PEERS:-}"
 FAILOVER_ON="${FAILOVER_ON:-429,502,503,504,timeout}"
 IP_INTERVAL="${IP_INTERVAL:-5m}"
 PROXY_PROBE_INTERVAL="${PROXY_PROBE_INTERVAL:-30s}"
@@ -148,14 +147,6 @@ build_args() {
     [ -n "$CLUSTER_TOKEN" ]     && a+=(--cluster-token "$CLUSTER_TOKEN")
     [ -n "$CLUSTER_LISTEN" ]    && a+=(--cluster-listen "$CLUSTER_LISTEN")
     [ -n "$CLUSTER_JOIN" ]      && a+=(--cluster-join "$CLUSTER_JOIN")
-    if [ -n "$PEERS" ]; then
-        local p
-        IFS=';' read -ra __peers <<< "$PEERS"
-        for p in "${__peers[@]}"; do
-            p="$(echo "$p" | xargs)"
-            [ -n "$p" ] && a+=(--peer "$p")
-        done
-    fi
     [ -n "$FAILOVER_ON" ]       && a+=(--failover-on "$FAILOVER_ON")
     [ -n "$USER_AGENT" ]        && a+=(--header "User-Agent: $USER_AGENT")
     [ -n "$X_OPENCODE_CLIENT" ] && a+=(--header "x-opencode-client: $X_OPENCODE_CLIENT")

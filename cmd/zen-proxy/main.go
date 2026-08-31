@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	version          = "1.18.29"
+	version          = "1.18.30"
 	defaultUserAgent = "opencode/" + version + " ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 	defaultClient    = "cli"
 	defaultProject   = "global"
@@ -68,7 +68,6 @@ func usage() {
   --cluster-token <t>  集群鉴权token (常量时间比较)
   --cluster-listen <addr>  集群私有协议监听, 如 :9443
   --cluster-join <addr>    私网主动外拨加入公网节点, 如 公网:9443 (反向隧道)
-  --peer <addr>        集群对等节点, 可重复, 如 peer2:9443
   --failover-on <list> 触发集群转发的状态码/超时, 如 429,502,503,504,timeout (默认同)
 
   [头优先级]  --outbound-auth/-F/--header > 自动生成(会话/request) > 默认特征头 > 客户端头
@@ -76,7 +75,7 @@ func usage() {
 示例:
   %s 9000 https://opencode.ai/zen
   %s 9000 https://opencode.ai/zen --outbound-auth sk-xxx --cache-file ./logs/sess.json --verbose
-  %s 9000 https://opencode.ai/zen --cluster-id node1 --cluster-token s3 --cluster-listen :9443 --peer node2:9443
+  %s 9000 https://opencode.ai/zen --cluster-id node1 --cluster-token s3 --cluster-listen :9443 --cluster-join 公网:9443
 `, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 	os.Exit(1)
 }
@@ -300,7 +299,7 @@ func main() {
 	} else {
 		log.Printf("  出口策略: %s (X-Egress 头可覆盖) | 失败冷却 %s | 探测间隔 %s", egressDesc, egress.UnavailableCool, probeInterval)
 	}
-	if clusterCfg.JoinAddr != "" || clusterCfg.ListenAddr != "" || len(clusterCfg.Peers) > 0 {
+	if clusterCfg.JoinAddr != "" || clusterCfg.ListenAddr != "" {
 		log.Printf("  集群兜底: 双栈均失败时转发至对端 (join=%s listen=%s)", clusterCfg.JoinAddr, clusterCfg.ListenAddr)
 	} else {
 		log.Printf("  集群兜底: 未启用 (双栈均失败则直接返回错误, 可用 --cluster-join/--cluster-listen 启用)")
@@ -359,9 +358,9 @@ log.Printf("  特征头: User-Agent=%s client=%s project=%s outbound-auth=%s", d
 		log.Printf("  隧道信息: 持久化到 %s (记录建立/关闭/帧数)", clusterNode.Tunnels.Path)
 	}
 	if clusterNode.Enabled() {
-		log.Printf("  集群: id=%s listen=%s join=%s peers=%v failover-on=%v", clusterNode.SelfID(), clusterCfg.ListenAddr, clusterCfg.JoinAddr, clusterCfg.Peers, clusterCfg.FailoverOn)
+		log.Printf("  集群: id=%s listen=%s join=%s failover-on=%v", clusterNode.SelfID(), clusterCfg.ListenAddr, clusterCfg.JoinAddr, clusterCfg.FailoverOn)
 	} else {
-		log.Printf("  集群: 未启用 (可用 --cluster-listen/--peer/--cluster-join 启用)")
+		log.Printf("  集群: 未启用 (可用 --cluster-listen/--cluster-join 启用)")
 	}
 	log.Printf("  示例: GET /a -> %s%s/a", backendURL, basePath)
 

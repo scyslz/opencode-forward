@@ -69,7 +69,6 @@ type Config struct {
 	ListenAddr  string
 	JoinAddr    string
 	JoinWSSAddr string
-	Peers       []*Peer
 	FailoverOn  map[int]bool
 	FailTO      bool
 	TunnelFile  string
@@ -176,16 +175,8 @@ func ParseClusterArgs(args []string) (Config, []string) {
 		case "--peer":
 			if i+1 < len(args) {
 				i++
-				parts := strings.Split(args[i], ",")
-				peer := &Peer{
-					ID:   parts[0],
-					Addr: parts[0],
-				}
-				if len(parts) > 1 {
-					peer.WSSAddr = parts[1]
-				}
-				cfg.Peers = append(cfg.Peers, peer)
 			}
+			log.Printf("[cluster] --peer 已移除, 请用 --cluster-join/--cluster-listen (隧道模式)")
 		case "--failover-on":
 			if i+1 < len(args) {
 				i++
@@ -262,7 +253,7 @@ func genSelfSignedCert() (tls.Certificate, error) {
 }
 
 func (n *Node) Enabled() bool {
-	return n.cfg.ListenAddr != "" || n.cfg.JoinAddr != "" || len(n.cfg.Peers) > 0
+	return n.cfg.ListenAddr != "" || n.cfg.JoinAddr != ""
 }
 
 func (n *Node) Start(forward func(r *http.Request) (*http.Response, error)) error {
@@ -278,11 +269,6 @@ func (n *Node) Start(forward func(r *http.Request) (*http.Response, error)) erro
 		n.listener = tls.NewListener(ln, n.tlsCfg)
 		go n.acceptLoop()
 	}
-	for _, p := range n.cfg.Peers {
-		n.mu.Lock()
-		n.peers[p.ID] = p
-		n.mu.Unlock()
-	}
 	if n.cfg.JoinAddr != "" {
 		n.mu.Lock()
 		if _, ok := n.peers[n.cfg.JoinAddr]; !ok {
@@ -292,9 +278,6 @@ func (n *Node) Start(forward func(r *http.Request) (*http.Response, error)) erro
 	}
 	if n.cfg.JoinAddr != "" {
 		go n.joinLoop()
-	}
-	for _, p := range n.cfg.Peers {
-		go n.loopPeerTunnel(p)
 	}
 	go n.probeLoop()
 	return nil
@@ -540,58 +523,6 @@ func cleanAddr(addr string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(addr, "wss://"), "ws://")
 }
 
-func (n *Node) loopPeerTunnel(p *Peer) {
-	for {
-		var c net.Conn
-		var err error
-		var peerNodeID string
-
-		// 自动判断 TCP 还是 WSS
-		if strings.HasPrefix(p.Addr, "wss://") || strings.HasPrefix(p.Addr, "ws://") {
-			c, peerNodeID, err = n.dialWSS(p.Addr)
-		} else {
-			c, err = tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", p.Addr, n.tlsCfg)
-			if err == nil {
-				if peerNodeID, err = n.handshake(c, false); err != nil {
-					util.LogThrottledf(p.Addr+"-tcp-handshake", 30*time.Second, "[cluster] TCP 握手 peer %s 失败: %v", p.Addr, err)
-					_ = c.Close()
-					time.Sleep(3 * time.Second)
-					continue
-				}
-			}
-		}
-		if err == nil {
-			if peerNodeID != "" {
-				n.mu.Lock()
-				if pp, ok := n.peers[p.ID]; ok {
-					pp.NodeID = peerNodeID
-				} else {
-					p.NodeID = peerNodeID
-				}
-				n.mu.Unlock()
-			}
-		}
-
-		if err != nil {
-			util.LogThrottledf(p.Addr+"-dial", 30*time.Second, "[cluster] 拨号 peer %s 失败: %v, 3s重试", p.Addr, err)
-			time.Sleep(3 * time.Second)
-			continue
-		}
-
-		setTCPKeepAlive(c, n.keepAlive)
-		n.peerConns.Store(p.ID, c)
-		util.LogDebugf("[cluster] peer %s 隧道已建立 (keepalive=%s)", p.Addr, n.keepAlive)
-		isWS := strings.HasPrefix(p.Addr, "wss://") || strings.HasPrefix(p.Addr, "ws://")
-		tid := "out-" + util.RandomHex(4)
-		n.Tunnels.Open(tid, "outbound", "", p.Addr, c.LocalAddr().String())
-		n.handleConn(c, isWS, tid)
-		n.Tunnels.Close(tid)
-		n.peerConns.Delete(p.ID)
-		_ = c.Close()
-		time.Sleep(3 * time.Second)
-	}
-}
-
 func (n *Node) dialWSS(addr string) (net.Conn, string, error) {
 	dialer := websocket.Dialer{
 		TLSClientConfig:  n.tlsCfg,
@@ -663,6 +594,7 @@ func (n *Node) acceptLoop() {
 					wsID := c.RemoteAddr().String()
 					peersMap[wsID] = &Peer{ID: wsID, Addr: wsID, RTTms: 9999, NodeID: peerNodeID, Dynamic: true}
 					peersMu.Unlock()
+					inboundMap.Store(wsID, conn)
 					tid := "ws-" + util.RandomHex(4)
 					n.Tunnels.Open(tid, "inbound", peerNodeID, wsID, conn.LocalAddr().String())
 					n.handleConn(conn, true, tid)
@@ -672,7 +604,11 @@ func (n *Node) acceptLoop() {
 					inboundMap.Delete(wsID)
 					return
 				}
-				n.handleConn(conn, true, "ws-"+util.RandomHex(4))
+				inboundMap.Store(c.RemoteAddr().String(), conn)
+				tid2 := "ws-" + util.RandomHex(4)
+				n.Tunnels.Open(tid2, "inbound", "", c.RemoteAddr().String(), conn.LocalAddr().String())
+				n.handleConn(conn, true, tid2)
+				inboundMap.Delete(c.RemoteAddr().String())
 			}(c, br)
 			continue
 		}
