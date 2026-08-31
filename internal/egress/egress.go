@@ -30,7 +30,7 @@ func MakeResolver(dnsServer string) *net.Resolver {
 
 const (
 	UnavailableCool    = 30 * time.Second
-	MaxUnavailableCool = 10 * time.Minute
+	MaxUnavailableCool = 60 * time.Minute
 )
 
 type IPProbe struct {
@@ -178,10 +178,11 @@ type Manager struct {
 	Probes       map[string]*IPProbe
 	EgressPrefer string
 
-	stackDown map[string]bool
-	stackMu   sync.Mutex
-	unavail   map[string]time.Time
-	unavailMu sync.Mutex
+	stackDown    map[string]bool
+	stackMu      sync.Mutex
+	unavail      map[string]time.Time
+	unavailCount map[string]int
+	unavailMu    sync.Mutex
 }
 
 func NewManager(prefer, probeURL4, probeURL6 string, interval time.Duration, resolver *net.Resolver, proxyURL string, proxyInterval time.Duration) *Manager {
@@ -191,6 +192,7 @@ func NewManager(prefer, probeURL4, probeURL6 string, interval time.Duration, res
 		EgressPrefer: prefer,
 		stackDown:    map[string]bool{},
 		unavail:      map[string]time.Time{},
+		unavailCount: map[string]int{},
 	}
 	if proxyURL != "" {
 		u, err := url.Parse(proxyURL)
@@ -323,9 +325,18 @@ func (m *Manager) MarkUnavailable(fam string, isStack bool) {
 		return
 	}
 	m.unavailMu.Lock()
-	m.unavail[fam] = time.Now().Add(UnavailableCool)
+	c := m.unavailCount[fam] + 1
+	m.unavailCount[fam] = c
+	d := UnavailableCool * time.Duration(1<<uint(c-1))
+	if d > MaxUnavailableCool {
+		d = MaxUnavailableCool
+	}
+	if d < UnavailableCool {
+		d = MaxUnavailableCool
+	}
+	m.unavail[fam] = time.Now().Add(d)
 	m.unavailMu.Unlock()
-	log.Printf("[egress] %s 标记不可用 %s", famLabel(fam), UnavailableCool)
+	log.Printf("[egress] %s 标记不可用 %s (连续失败 %d 次, 指数退避)", famLabel(fam), d, c)
 }
 
 func (m *Manager) IsUnavailable(fam string) bool {
@@ -346,6 +357,7 @@ func (m *Manager) IsUnavailable(fam string) bool {
 func (m *Manager) MarkAvailable(fam string) {
 	m.unavailMu.Lock()
 	delete(m.unavail, fam)
+	delete(m.unavailCount, fam)
 	m.unavailMu.Unlock()
 	m.MarkStackDown(fam, false)
 }

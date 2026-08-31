@@ -55,12 +55,14 @@ type respFrame struct {
 }
 
 type Peer struct {
-	ID      string `json:"id"`
-	Addr    string `json:"addr"`
-	WSSAddr string `json:"wss_addr,omitempty"`
-	RTTms   int64  `json:"rtt_ms"`
-	NodeID  string `json:"node_id,omitempty"`
-	Dynamic bool   `json:"-"`
+	ID               string    `json:"id"`
+	Addr             string    `json:"addr"`
+	WSSAddr          string    `json:"wss_addr,omitempty"`
+	RTTms            int64     `json:"rtt_ms"`
+	NodeID           string    `json:"node_id,omitempty"`
+	Dynamic          bool      `json:"-"`
+	FailCount        int       `json:"-"`
+	UnavailableUntil time.Time `json:"-"`
 }
 
 type Config struct {
@@ -846,12 +848,19 @@ func (f *fakeResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return f.conn, bufio.NewReadWriter(f.br, bufio.NewWriter(f.conn)), nil
 }
 
+func isAuthErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "unauthorized") || strings.Contains(s, "token 不匹配") || strings.Contains(s, "握手被拒")
+}
+
 func (n *Node) joinLoop() {
+	authFails := 0
 	for {
 		var c net.Conn
 		var err error
-
-		// 根据前缀自动判断 TCP/WSS
 		if strings.HasPrefix(n.cfg.JoinAddr, "wss://") || strings.HasPrefix(n.cfg.JoinAddr, "ws://") {
 			c, _, err = n.dialWSS(n.cfg.JoinAddr)
 		} else {
@@ -869,13 +878,23 @@ func (n *Node) joinLoop() {
 				err = tcpErr
 			}
 		}
-
 		if err != nil {
-			util.LogThrottledf(n.cfg.JoinAddr+"-join", 30*time.Second, "[cluster] Join %s 失败: %v, 3s重试", n.cfg.JoinAddr, err)
-			time.Sleep(3 * time.Second)
+			if isAuthErr(err) {
+				authFails++
+				d := 10 * time.Second * time.Duration(1<<uint(authFails-1))
+				if d > 3*time.Minute {
+					d = 3 * time.Minute
+				}
+				log.Printf("[cluster] Join %s 鉴权失败, %s后重试 (连续失败 %d 次)", n.cfg.JoinAddr, d, authFails)
+				time.Sleep(d)
+			} else {
+				authFails = 0
+				util.LogThrottledf(n.cfg.JoinAddr+"-join", 30*time.Second, "[cluster] Join %s 失败: %v, 3s重试", n.cfg.JoinAddr, err)
+				time.Sleep(3 * time.Second)
+			}
 			continue
 		}
-
+		authFails = 0
 		log.Printf("[cluster] 节点 %s 已加入 %s (keepalive=%s)", n.selfID, n.cfg.JoinAddr, n.keepAlive)
 		setTCPKeepAlive(c, n.keepAlive)
 		n.joinMu.Lock()
@@ -894,6 +913,21 @@ func (n *Node) joinLoop() {
 	}
 }
 
+func peerBackoffDuration(failCount int) time.Duration {
+	if failCount <= 0 {
+		return 30 * time.Second
+	}
+	shift := failCount - 1
+	if shift > 10 {
+		shift = 10
+	}
+	d := 30 * time.Second * time.Duration(1<<uint(shift))
+	if d > time.Hour {
+		d = time.Hour
+	}
+	return d
+}
+
 func (n *Node) probeLoop() {
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
@@ -905,6 +939,16 @@ func (n *Node) probeLoop() {
 		}
 		n.mu.RUnlock()
 		for _, p := range list {
+			n.mu.RLock()
+			until := n.peers[p.ID]
+			var skip bool
+			if until != nil && !until.UnavailableUntil.IsZero() && time.Now().Before(until.UnavailableUntil) {
+				skip = true
+			}
+			n.mu.RUnlock()
+			if skip {
+				continue
+			}
 			start := time.Now()
 			dummyURL, _ := url.Parse(PingPath)
 			dummyReq := &http.Request{Method: http.MethodGet, URL: dummyURL, Header: http.Header{}}
@@ -921,14 +965,19 @@ func (n *Node) probeLoop() {
 					if resp != nil {
 						resp.Body.Close()
 					}
+					peer.FailCount++
+					d := peerBackoffDuration(peer.FailCount)
+					peer.UnavailableUntil = time.Now().Add(d)
 					if err != nil {
-						util.LogDebugf("[cluster] ping peer %s fail (tunnel): %v", p.Addr, err)
+						util.LogDebugf("[cluster] ping peer %s fail (tunnel): %v, 标记不可用 %s (%d 次)", p.Addr, err, d, peer.FailCount)
 					} else {
-						util.LogDebugf("[cluster] ping peer %s status=%d (tunnel)", p.Addr, resp.StatusCode)
+						util.LogDebugf("[cluster] ping peer %s status=%d (tunnel), 标记不可用 %s (%d 次)", p.Addr, resp.StatusCode, d, peer.FailCount)
 					}
 					n.mu.Unlock()
 					continue
 				}
+				peer.FailCount = 0
+				peer.UnavailableUntil = time.Time{}
 				resp.Body.Close()
 				util.LogDebugf("[cluster] ping peer %s ok rtt=%dms (tunnel)", p.Addr, rtt)
 			}
@@ -948,7 +997,6 @@ func (n *Node) handleConn(c net.Conn, isWS bool, tunnelID string) {
 		_ = tcp.SetKeepAlive(true)
 		_ = tcp.SetKeepAlivePeriod(n.keepAlive)
 	}
-	// 定期发送 ping 保持连接活跃（有活跃请求时跳过）
 	go func() {
 		ticker := time.NewTicker(20 * time.Second)
 		defer ticker.Stop()
@@ -1037,6 +1085,8 @@ func (n *Node) PickPeers(visited map[string]bool) []*Peer {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	var list []*Peer
+	var unavailable []*Peer
+	now := time.Now()
 	for _, p := range n.peers {
 		if visited[p.ID] {
 			continue
@@ -1044,30 +1094,62 @@ func (n *Node) PickPeers(visited map[string]bool) []*Peer {
 		if p.NodeID != "" && visited[p.NodeID] {
 			continue
 		}
+		if !p.UnavailableUntil.IsZero() && now.Before(p.UnavailableUntil) {
+			unavailable = append(unavailable, p)
+			continue
+		}
 		list = append(list, p)
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].RTTms < list[j].RTTms })
+	if len(list) == 0 && len(unavailable) > 0 {
+		sort.Slice(unavailable, func(i, j int) bool { return unavailable[i].RTTms < unavailable[j].RTTms })
+		return unavailable
+	}
 	return list
 }
 
 func (n *Node) ForwardToPeer(ctx context.Context, peer *Peer, orig *http.Request, body []byte, visited []string, hop int) (*http.Response, error) {
+	var c net.Conn
 	n.joinMu.Lock()
 	jc := n.joinConn
 	n.joinMu.Unlock()
 	if jc != nil && n.cfg.JoinAddr != "" && peer.Addr == n.cfg.JoinAddr {
-		return n.forwardViaFrame(ctx, jc, orig, body, visited, hop)
-	}
-	if v, ok := n.peerConns.Load(peer.Addr); ok {
-		if c := v.(net.Conn); c != nil {
-			return n.forwardViaFrame(ctx, c, orig, body, visited, hop)
+		c = jc
+	} else if v, ok := n.peerConns.Load(peer.Addr); ok {
+		if cc, ok := v.(net.Conn); ok && cc != nil {
+			c = cc
+		}
+	} else if v, ok := n.inboundConns.Load(peer.Addr); ok {
+		if cc, ok := v.(net.Conn); ok && cc != nil {
+			c = cc
 		}
 	}
-	if v, ok := n.inboundConns.Load(peer.Addr); ok {
-		if c := v.(net.Conn); c != nil {
-			return n.forwardViaFrame(ctx, c, orig, body, visited, hop)
+	if c == nil {
+		n.mu.Lock()
+		if p := n.peers[peer.ID]; p != nil {
+			p.FailCount++
+			p.UnavailableUntil = time.Now().Add(peerBackoffDuration(p.FailCount))
+		}
+		n.mu.Unlock()
+		return nil, fmt.Errorf("no tls tunnel to peer %s", peer.Addr)
+	}
+	resp, err := n.forwardViaFrame(ctx, c, orig, body, visited, hop)
+	n.mu.Lock()
+	if p := n.peers[peer.ID]; p != nil {
+		if err != nil {
+			s := err.Error()
+			isTO := strings.Contains(s, "timeout") || strings.Contains(s, "deadline") || strings.Contains(s, "超时")
+			if isTO || strings.Contains(s, "tunnel") {
+				p.FailCount++
+				p.UnavailableUntil = time.Now().Add(peerBackoffDuration(p.FailCount))
+			}
+		} else {
+			p.FailCount = 0
+			p.UnavailableUntil = time.Time{}
 		}
 	}
-	return nil, fmt.Errorf("no tls tunnel to peer %s", peer.Addr)
+	n.mu.Unlock()
+	return resp, err
 }
 
 func (n *Node) ForwardCluster(ctx context.Context, r *http.Request, body []byte) (*http.Response, error) {
