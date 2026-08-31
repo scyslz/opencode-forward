@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	version          = "1.18.28"
+	version          = "1.18.29"
 	defaultUserAgent = "opencode/" + version + " ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 	defaultClient    = "cli"
 	defaultProject   = "global"
@@ -35,7 +35,7 @@ func usage() {
 
 自动注入的开源 CLI 特征头:
   Authorization:      Bearer <token>       --outbound-auth 注入并覆盖客户端授权
-  User-Agent:         opencode/1.18.28 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14
+  User-Agent:         opencode/1.18.29 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14
   x-opencode-client:  cli              固定
   x-opencode-project: global           一般固定
   x-opencode-session: ses_xxx          会话映射/缓存

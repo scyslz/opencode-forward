@@ -10,7 +10,7 @@
 set -u
 
 REPO="scyslz/opencode-forward"
-TAG="${ZEN_VERSION:-v1.18.28}"
+TAG="${ZEN_VERSION:-v1.18.29}"
 SELF="$(readlink -f "$0")"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$DIR/opencode-zen-proxy"
@@ -28,7 +28,7 @@ PROXY_PROBE_INTERVAL="${PROXY_PROBE_INTERVAL:-30s}"
 IP_URL="${IP_URL:-}"
 DUMP="${DUMP:-0}"
 VERBOSE="${VERBOSE:-0}"
-USER_AGENT="${USER_AGENT:-opencode/1.18.28 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14}"
+USER_AGENT="${USER_AGENT:-opencode/1.18.29 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14}"
 X_OPENCODE_CLIENT="${X_OPENCODE_CLIENT:-cli}"
 X_OPENCODE_PROJECT="${X_OPENCODE_PROJECT:-global}"
 LOG_DIR="${LOG_DIR:-$DIR/logs}"
