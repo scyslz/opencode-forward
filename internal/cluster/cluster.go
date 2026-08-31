@@ -145,7 +145,7 @@ func (n *Node) IsInternalPath(p string) bool                                  { 
 func (n *Node) HandleHTTP(w http.ResponseWriter, r *http.Request) bool         { return handleClusterHTTP(w, r, n) }
 
 func ParseClusterArgs(args []string) (Config, []string) {
-	cfg := Config{FailoverOn: map[int]bool{429: true, 502: true, 503: true, 504: true}, FailTO: true}
+	cfg := Config{FailoverOn: map[int]bool{403: true, 429: true, 502: true, 503: true, 504: true}, FailTO: true}
 	var rest []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]

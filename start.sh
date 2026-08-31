@@ -10,7 +10,7 @@
 set -u
 
 REPO="scyslz/opencode-forward"
-TAG="${ZEN_VERSION:-v1.18.31}"
+TAG="${ZEN_VERSION:-v1.18.32}"
 SELF="$(readlink -f "$0")"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$DIR/opencode-zen-proxy"
@@ -21,7 +21,7 @@ FWD_INBOUND="${FWD_INBOUND:-0}"
 EGRESS_PREFER="${PREFER:-${EGRESS_PREFER:-6}}"
 CLUSTER_LISTEN="${CLUSTER_LISTEN:-}"
 CLUSTER_JOIN="${CLUSTER_JOIN:-}"
-FAILOVER_ON="${FAILOVER_ON:-429,502,503,504,timeout}"
+FAILOVER_ON="${FAILOVER_ON:-403,429,502,503,504,timeout}"
 IP_INTERVAL="${IP_INTERVAL:-5m}"
 PROXY_PROBE_INTERVAL="${PROXY_PROBE_INTERVAL:-30s}"
 IP_URL="${IP_URL:-}"
@@ -49,18 +49,43 @@ case "$ARCH" in
     *) echo "Unsupported arch: $ARCH"; exit 1 ;;
 esac
 
+check_new_version() {
+    local latest
+    latest=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
+    [ -z "$latest" ] && return 0
+    if [ "$latest" != "$TAG" ]; then
+        echo "New version available: $latest (current $TAG)" >&2
+        if [ "${ZEN_AUTO_UPDATE:-0}" = "1" ]; then
+            echo "Auto-updating to $latest ..." >&2
+            TAG="$latest"
+            TAG_UPDATED=1
+        elif [ -t 0 ] && [ "${1:-}" != "--quiet" ]; then
+            printf 'Update to %s? [y/N]: ' "$latest" >&2
+            read -r ans || ans=""
+            case "$ans" in y|Y|yes|YES) TAG="$latest"; TAG_UPDATED=1 ;; *) echo "Keeping $TAG" >&2 ;; esac
+        fi
+    fi
+}
+
 ensure_binary() {
-    [ -x "$BIN" ] && return 0
-    local url="https://github.com/${REPO}/releases/download/${TAG}/opencode-zen-proxy-linux-${ARCH}.tar.gz"
-    echo "Binary not found, downloading $TAG linux-$ARCH ..."
-    command -v curl >/dev/null || { echo "curl is required"; exit 1; }
-    rm -rf /tmp/zen-download && mkdir -p /tmp/zen-download
-    # download to file first: piping into tar breaks on slow/stalled upstreams
-    curl -fsSL --connect-timeout 15 --max-time 120 -o /tmp/zen-download/pkg.tar.gz "$url" || { echo "Download failed: $url"; rm -rf /tmp/zen-download; exit 1; }
-    tar -zxf /tmp/zen-download/pkg.tar.gz -C /tmp/zen-download
-    mv /tmp/zen-download/opencode-zen-proxy "$BIN" && chmod +x "$BIN"
-    rm -rf /tmp/zen-download
-    echo "Downloaded: $BIN"
+    local need_dl=0
+    if [ ! -x "$BIN" ]; then
+        need_dl=1
+    elif [ -n "${TAG_UPDATED:-}" ]; then
+        need_dl=1
+        echo "Version changed to $TAG, re-downloading ..." >&2
+    fi
+    if [ "$need_dl" = "1" ]; then
+        local url="https://github.com/${REPO}/releases/download/${TAG}/opencode-zen-proxy-linux-${ARCH}.tar.gz"
+        echo "Downloading $TAG linux-$ARCH ..." >&2
+        command -v curl >/dev/null || { echo "curl is required"; exit 1; }
+        rm -rf /tmp/zen-download && mkdir -p /tmp/zen-download
+        curl -fsSL --connect-timeout 15 --max-time 120 -o /tmp/zen-download/pkg.tar.gz "$url" || { echo "Download failed: $url"; rm -rf /tmp/zen-download; exit 1; }
+        tar -zxf /tmp/zen-download/pkg.tar.gz -C /tmp/zen-download
+        mv /tmp/zen-download/opencode-zen-proxy "$BIN" && chmod +x "$BIN"
+        rm -rf /tmp/zen-download
+        echo "Downloaded: $BIN"
+    fi
 }
 
 ask() { # $1=var name $2=prompt $3=default -> stdout
@@ -233,6 +258,7 @@ summary() {
 }
 
 prepare() {
+    check_new_version
     ensure_binary
     mkdir -p "$LOG_DIR"
     rotate_logs
