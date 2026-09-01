@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	version          = "1.18.41"
+	version          = "1.18.42"
 	defaultUserAgent = "opencode/" + version + " ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 	defaultClient    = "cli"
 	defaultProject   = "global"
@@ -83,6 +83,10 @@ func usage() {
 func authSummary(tok string) string { if tok != "" { return "Bearer "+tok }; return "透传客户端Authorization" }
 
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-v" || os.Args[1] == "version") {
+		fmt.Println(version)
+		os.Exit(0)
+	}
 	if len(os.Args) < 3 {
 		usage()
 	}

@@ -10,10 +10,17 @@
 set -u
 
 REPO="scyslz/opencode-forward"
-TAG="${ZEN_VERSION:-v1.18.41}"
 SELF="$(readlink -f "$0")"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$DIR/opencode-zen-proxy"
+if [ -n "${ZEN_VERSION:-}" ]; then
+	TAG="$ZEN_VERSION"
+elif [ -x "$BIN" ]; then
+	_ver=$("$BIN" --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+	if [ -n "${_ver:-}" ]; then case "$_ver" in v*) TAG="$_ver" ;; *) TAG="v$_ver" ;; esac; else TAG="v1.18.42"; fi
+else
+	TAG="v1.18.42"
+fi
 
 BACKEND="${BACKEND:-https://opencode.ai/zen/v1}"
 OUTBOUND_AUTH="${OUTBOUND_AUTH:-public}"
