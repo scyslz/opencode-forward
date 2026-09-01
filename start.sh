@@ -10,7 +10,7 @@
 set -u
 
 REPO="scyslz/opencode-forward"
-TAG="${ZEN_VERSION:-v1.18.38}"
+TAG="${ZEN_VERSION:-v1.18.39}"
 SELF="$(readlink -f "$0")"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$DIR/opencode-zen-proxy"
@@ -55,7 +55,7 @@ check_new_version() {
     [ -z "$latest" ] && return 0
     if [ "$latest" != "$TAG" ]; then
         echo "New version available: $latest (current $TAG)" >&2
-        if [ "${ZEN_AUTO_UPDATE:-1}" = "1" ]; then
+        if [ "${ZEN_AUTO_UPDATE:-0}" = "1" ]; then
             echo "Auto-updating to $latest ..." >&2
             TAG="$latest"
             TAG_UPDATED=1
@@ -328,7 +328,7 @@ cmd_status() {
 }
 
 case "${1:-start}" in
-    start)     is_running && { echo "Already running (pid $(cat "$PIDFILE"))"; exit 0; }; cmd_start_bg ;;
+    start)     if is_running; then check_new_version; if [ -n "${TAG_UPDATED:-}" ]; then echo "New version $TAG detected, restarting ..."; do_stop; sleep 1; cmd_start_bg; else echo "Already running (pid $(cat "$PIDFILE"))"; exit 0; fi; else cmd_start_bg; fi ;;
     run|-f|fg) is_running && { echo "Already running (pid $(cat "$PIDFILE")), stop first for foreground"; exit 0; }; cmd_run_fg ;;
     stop)      do_stop ;;
     restart)   do_stop; sleep 1; cmd_start_bg ;;
