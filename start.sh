@@ -213,13 +213,14 @@ build_args() {
     printf '%s\n' "${a[@]}"
 }
 
-bin_of() { readlink -f "/proc/$1/exe" 2>/dev/null; }
-
 is_running() {
     [ -f "$PIDFILE" ] || return 1
     local pid; pid="$(cat "$PIDFILE")"
-    { [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; } || return 1
-    [ "$(bin_of "$pid")" = "$(readlink -f "$BIN")" ]
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
+    if [ -f "/proc/$pid/cmdline" ]; then
+        tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q "opencode-zen-proxy" || return 1
+    fi
+    return 0
 }
 
 port_pids() {
@@ -241,13 +242,12 @@ wait_dead() {
     return 1
 }
 
-# Port conflict: kill stale instances of this binary, abort on foreign processes
 resolve_conflict() {
     local pid pids
     pids="$(port_pids)"
     for pid in $pids; do
-        if [ "$(bin_of "$pid")" = "$(readlink -f "$BIN")" ]; then
-            echo "Port $PORT held by old instance of this binary (pid $pid), stopping it..."
+        if [ -f "/proc/$pid/cmdline" ] && tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q "opencode-zen-proxy"; then
+            echo "Port $PORT held by old instance (pid $pid), stopping it..." >&2
             kill "$pid" 2>/dev/null
             wait_dead "$pid" || kill -9 "$pid" 2>/dev/null
         else
