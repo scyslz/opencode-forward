@@ -10,7 +10,7 @@
 set -u
 
 REPO="scyslz/opencode-forward"
-TAG="${ZEN_VERSION:-v1.18.37}"
+TAG="${ZEN_VERSION:-v1.18.38}"
 SELF="$(readlink -f "$0")"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$DIR/opencode-zen-proxy"
@@ -55,7 +55,7 @@ check_new_version() {
     [ -z "$latest" ] && return 0
     if [ "$latest" != "$TAG" ]; then
         echo "New version available: $latest (current $TAG)" >&2
-        if [ "${ZEN_AUTO_UPDATE:-0}" = "1" ]; then
+        if [ "${ZEN_AUTO_UPDATE:-1}" = "1" ]; then
             echo "Auto-updating to $latest ..." >&2
             TAG="$latest"
             TAG_UPDATED=1
@@ -63,6 +63,10 @@ check_new_version() {
             printf 'Update to %s? [y/N]: ' "$latest" >&2
             read -r ans || ans=""
             case "$ans" in y|Y|yes|YES) TAG="$latest"; TAG_UPDATED=1 ;; *) echo "Keeping $TAG" >&2 ;; esac
+        else
+            echo "Auto-updating to $latest ..." >&2
+            TAG="$latest"
+            TAG_UPDATED=1
         fi
     fi
 }
