@@ -1008,6 +1008,9 @@ func (n *Node) handleConn(c net.Conn, isWS bool, tunnelID string) {
 		_ = tcp.SetKeepAlivePeriod(n.keepAlive)
 	}
 	go func() {
+		if !strings.HasPrefix(tunnelID, "join-") {
+			return
+		}
 		ticker := time.NewTicker(20 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
