@@ -31,7 +31,7 @@ func MakeResolver(dnsServer string) *net.Resolver {
 const (
 	UnavailableCool    = 30 * time.Second
 	MaxUnavailableCool = 60 * time.Minute
-	MaxProbeInterval   = 15 * time.Minute
+	MaxProbeInterval   = 60 * time.Minute
 )
 
 type IPProbe struct {
@@ -94,13 +94,6 @@ func famLabel(mode string) string {
 func (p *IPProbe) refresh() {
 	ip, err := p.probe()
 	if err != nil {
-		if util.IsStackErrStatic(err) {
-			p.mu.Lock()
-			p.failCount = 0
-			p.mu.Unlock()
-			log.Printf("[ip-probe] %s 探测失败: %v (栈不可用, 不退避)", famLabel(p.mode), err)
-			return
-		}
 		p.mu.Lock()
 		p.failCount++
 		p.mu.Unlock()
