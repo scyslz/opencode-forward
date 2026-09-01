@@ -15,12 +15,14 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$DIR/opencode-zen-proxy"
 if [ -n "${ZEN_VERSION:-}" ]; then
 	TAG="$ZEN_VERSION"
+	echo "[init] TAG from ZEN_VERSION=$TAG" >&2
 elif [ -x "$BIN" ]; then
 	_ver=$("$BIN" --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
-	if [ -n "${_ver:-}" ]; then case "$_ver" in v*) TAG="$_ver" ;; *) TAG="v$_ver" ;; esac; else TAG=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4); [ -z "${TAG:-}" ] && { echo "无法获取最新版本且本地BIN版本解析失败" >&2; exit 1; }; fi
+	if [ -n "${_ver:-}" ]; then case "$_ver" in v*) TAG="$_ver" ;; *) TAG="v$_ver" ;; esac; echo "[init] TAG from BIN $BIN version=$_ver -> $TAG" >&2; else TAG=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4); [ -z "${TAG:-}" ] && { echo "无法获取最新版本且本地BIN版本解析失败" >&2; exit 1; }; echo "[init] BIN version parse failed, fetched latest TAG=$TAG" >&2; fi
 else
 	TAG=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
 	[ -z "${TAG:-}" ] && { echo "无法获取最新版本（网络失败）" >&2; exit 1; }
+	echo "[init] no BIN, fetched latest TAG=$TAG" >&2
 fi
 
 BACKEND="${BACKEND:-https://opencode.ai/zen/v1}"
@@ -59,11 +61,14 @@ esac
 
 check_new_version() {
     local latest
+    echo "[check] current TAG=$TAG, fetching latest ..." >&2
     latest=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
-    [ -z "$latest" ] && return 0
+    if [ -z "$latest" ]; then echo "[check] fetch latest failed (empty)" >&2; return 0; fi
+    echo "[check] latest=$latest current=$TAG" >&2
     if [ "$latest" != "$TAG" ]; then
         _cur="${TAG#v}"; _lat="${latest#v}"
         if [ "$(printf '%s\n%s\n' "$_cur" "$_lat" | sort -V | head -n1)" = "$_lat" ] && [ "$_cur" != "$_lat" ]; then
+            echo "[check] latest $latest < current $TAG, skip downgrade" >&2
             return 0
         fi
         echo "New version available: $latest (current $TAG)" >&2
@@ -71,15 +76,20 @@ check_new_version() {
             echo "Auto-updating to $latest ..." >&2
             TAG="$latest"
             TAG_UPDATED=1
+            echo "[check] TAG_UPDATED=1 (auto)" >&2
         elif [ -t 0 ] && [ "${1:-}" != "--quiet" ]; then
             printf 'Update to %s? [y/N]: ' "$latest" >&2
             read -r ans || ans=""
-            case "$ans" in y|Y|yes|YES) TAG="$latest"; TAG_UPDATED=1 ;; *) echo "Keeping $TAG" >&2 ;; esac
+            echo "[check] input ans=$ans" >&2
+            case "$ans" in y|Y|yes|YES) TAG="$latest"; TAG_UPDATED=1; echo "[check] TAG_UPDATED=1 (Y)" >&2 ;; *) echo "Keeping $TAG" >&2 ;; esac
         else
             echo "Auto-updating to $latest ..." >&2
             TAG="$latest"
             TAG_UPDATED=1
+            echo "[check] TAG_UPDATED=1 (non-interactive auto)" >&2
         fi
+    else
+        echo "[check] already latest" >&2
     fi
 }
 
@@ -87,9 +97,12 @@ ensure_binary() {
     local need_dl=0
     if [ ! -x "$BIN" ]; then
         need_dl=1
+        echo "[ensure] BIN not executable, need_dl=1" >&2
     elif [ -n "${TAG_UPDATED:-}" ]; then
         need_dl=1
         echo "Version changed to $TAG, re-downloading ..." >&2
+    else
+        echo "[ensure] BIN exists TAG=$TAG TAG_UPDATED=${TAG_UPDATED:-0} skip download" >&2
     fi
     if [ "$need_dl" = "1" ]; then
         local url="https://github.com/${REPO}/releases/download/${TAG}/opencode-zen-proxy-linux-${ARCH}.tar.gz"
