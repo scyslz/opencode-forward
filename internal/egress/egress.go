@@ -31,6 +31,7 @@ func MakeResolver(dnsServer string) *net.Resolver {
 const (
 	UnavailableCool    = 30 * time.Second
 	MaxUnavailableCool = 60 * time.Minute
+	MaxProbeInterval   = 15 * time.Minute
 )
 
 type IPProbe struct {
@@ -123,11 +124,11 @@ func (p *IPProbe) run() {
 				shift = 10
 			}
 			d := UnavailableCool * time.Duration(1<<uint(shift))
-			if d > MaxUnavailableCool {
-				d = MaxUnavailableCool
+			if d > MaxProbeInterval {
+				d = MaxProbeInterval
 			}
 			if d < UnavailableCool {
-				d = MaxUnavailableCool
+				d = MaxProbeInterval
 			}
 			ticker.Reset(d)
 			continue
