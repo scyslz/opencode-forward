@@ -187,6 +187,25 @@ func dumpResponse(resp *http.Response, prefix string, withBody bool) {
 		log.Printf("%s <nil>", prefix)
 		return
 	}
+	if strings.Contains(resp.Header.Get("Content-Type"), "event-stream") {
+		var b strings.Builder
+		fmt.Fprintf(&b, "\n----- %s -----\n", prefix)
+		fmt.Fprintf(&b, "HTTP %d %s\n", resp.StatusCode, resp.Status)
+		keys := make([]string, 0, len(resp.Header))
+		for k := range resp.Header {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			for _, v := range resp.Header[k] {
+				fmt.Fprintf(&b, "%s: %s\n", k, v)
+			}
+		}
+		b.WriteString("\n[BODY streaming event-stream, not buffered]\n")
+		b.WriteString(fmt.Sprintf("----- %s end -----", prefix))
+		log.Print(b.String())
+		return
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n----- %s -----\n", prefix)
 	fmt.Fprintf(&b, "HTTP %d %s\n", resp.StatusCode, resp.Status)
@@ -377,7 +396,7 @@ func (p *Proxy) buildOutbound(in *http.Request, outSession string) *http.Request
 	return out
 }
 
-func (p *Proxy) doLocal(ctx context.Context, fam string, in *http.Request, body []byte) (*http.Response, error) {
+func (p *Proxy) doLocalBuffered(ctx context.Context, fam string, in *http.Request, body []byte) (*http.Response, error) {
 	ns := p.egress.NsKey(fam)
 	incomingSession := in.Header.Get("X-Opencode-Session")
 	outSession := p.sess.resolve(ns, incomingSession)
@@ -385,11 +404,6 @@ func (p *Proxy) doLocal(ctx context.Context, fam string, in *http.Request, body 
 	if len(body) > 0 {
 		outReq.Body = io.NopCloser(bytes.NewReader(body))
 		outReq.ContentLength = int64(len(body))
-	}
-	isStream := bytes.Contains(body, []byte(`"stream":true`)) || bytes.Contains(body, []byte(`"stream": true`))
-	if isStream {
-		outReq.Header.Set("Accept", "text/event-stream")
-		outReq.Header.Set("Cache-Control", "no-cache")
 	}
 	if p.cfg.Dump {
 		dumpOutbound(outReq, body, ns, incomingSession, outSession, p.cfg.Verbose)
@@ -400,12 +414,19 @@ func (p *Proxy) doLocal(ctx context.Context, fam string, in *http.Request, body 
 	if err != nil {
 		return nil, err
 	}
-	isStreamResp := strings.Contains(resp.Header.Get("Content-Type"), "event-stream")
-	shouldBuffer := !isStream && !isStreamResp
+	if strings.Contains(resp.Header.Get("Content-Type"), "event-stream") {
+		if p.cfg.Dump {
+			dumpResponse(resp, fmt.Sprintf("本地 IPv%s 响应 %s", fam, in.URL.Path), false)
+		}
+		if p.cfg.Verbose {
+			log.Printf("[opencode-proxy] %s %s%s -> IPv%s session:%q->%q status=%d stream=false ct=%q cl=%d (event-stream直通)", in.Method, p.cfg.BackendURL, in.URL.Path, fam, incomingSession, outSession, resp.StatusCode, resp.Header.Get("Content-Type"), resp.ContentLength)
+		}
+		return resp, nil
+	}
 	if p.cfg.Dump {
 		dumpResponse(resp, fmt.Sprintf("本地 IPv%s 响应 %s", fam, in.URL.Path), p.cfg.Verbose)
 	}
-	if shouldBuffer && resp.Body != nil {
+	if resp.Body != nil {
 		nb, rerr := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if rerr != nil {
@@ -417,9 +438,57 @@ func (p *Proxy) doLocal(ctx context.Context, fam string, in *http.Request, body 
 		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(nb)))
 	}
 	if p.cfg.Verbose {
-		log.Printf("[opencode-proxy] %s %s%s -> IPv%s session:%q->%q status=%d stream=%v ct=%q cl=%d", in.Method, p.cfg.BackendURL, in.URL.Path, fam, incomingSession, outSession, resp.StatusCode, isStream, resp.Header.Get("Content-Type"), resp.ContentLength)
+		log.Printf("[opencode-proxy] %s %s%s -> IPv%s session:%q->%q status=%d stream=false ct=%q cl=%d", in.Method, p.cfg.BackendURL, in.URL.Path, fam, incomingSession, outSession, resp.StatusCode, resp.Header.Get("Content-Type"), resp.ContentLength)
 	}
 	return resp, nil
+}
+
+func (p *Proxy) doLocalStream(ctx context.Context, fam string, in *http.Request, body []byte) (*http.Response, error) {
+	ns := p.egress.NsKey(fam)
+	incomingSession := in.Header.Get("X-Opencode-Session")
+	outSession := p.sess.resolve(ns, incomingSession)
+	outReq := p.buildOutbound(in, outSession)
+	if len(body) > 0 {
+		outReq.Body = io.NopCloser(bytes.NewReader(body))
+		outReq.ContentLength = int64(len(body))
+	}
+	outReq.Header.Set("Accept", "text/event-stream")
+	outReq.Header.Set("Cache-Control", "no-cache")
+	if p.cfg.Dump {
+		dumpOutbound(outReq, body, ns, incomingSession, outSession, p.cfg.Verbose)
+	}
+	outReq = outReq.WithContext(ctx)
+	tr := p.egress.Transport(fam)
+	resp, err := tr.RoundTrip(outReq)
+	if err != nil {
+		return nil, err
+	}
+	isStreamResp := strings.Contains(resp.Header.Get("Content-Type"), "event-stream")
+	if p.cfg.Dump {
+		dumpResponse(resp, fmt.Sprintf("本地 IPv%s 响应 %s", fam, in.URL.Path), false)
+	}
+	if !isStreamResp && resp.Body != nil && !p.cfg.Dump {
+		nb, rerr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if rerr != nil {
+			return nil, rerr
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(nb))
+		resp.ContentLength = int64(len(nb))
+		resp.Header.Del("Transfer-Encoding")
+		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(nb)))
+	}
+	if p.cfg.Verbose {
+		log.Printf("[opencode-proxy] %s %s%s -> IPv%s session:%q->%q status=%d stream=true ct=%q cl=%d", in.Method, p.cfg.BackendURL, in.URL.Path, fam, incomingSession, outSession, resp.StatusCode, resp.Header.Get("Content-Type"), resp.ContentLength)
+	}
+	return resp, nil
+}
+
+func (p *Proxy) doLocal(ctx context.Context, fam string, in *http.Request, body []byte) (*http.Response, error) {
+	if isStreamRequest(body) {
+		return p.doLocalStream(ctx, fam, in, body)
+	}
+	return p.doLocalBuffered(ctx, fam, in, body)
 }
 
 func (p *Proxy) HandleClusterForward(r *http.Request) (*http.Response, error) {
