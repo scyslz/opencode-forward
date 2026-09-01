@@ -371,6 +371,9 @@ func (m *Manager) MarkAvailable(fam string) {
 }
 
 func (m *Manager) EgressOrder(r *http.Request) []string {
+	if m.EgressPrefer == "off" {
+		return []string{}
+	}
 	if _, ok := m.transports["px"]; ok {
 		return []string{"px"}
 	}
@@ -382,6 +385,8 @@ func (m *Manager) EgressOrder(r *http.Request) []string {
 		return []string{v, other}
 	}
 	switch m.EgressPrefer {
+	case "off":
+		return []string{}
 	case "d4":
 		return []string{"4"}
 	case "d6":

@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	version            = "1.18.46"
+	version            = "1.18.47"
 	opencodeCliVersion = "1.18.24"
 	defaultUserAgent   = "opencode/" + opencodeCliVersion + " ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 	defaultClient      = "cli"
@@ -64,7 +64,7 @@ func usage() {
   --ip-url <url>       出口IP探测服务 (默认 IPv4: https://api.ipify.org, IPv6: https://api6.ipify.org)
   --proxy <url>        经代理出口, http/https/socks5/socks5h, 如 socks5://127.0.0.1:1080 (优先代理, 不区分4/6)
   --proxy-probe-interval <dur>  代理出口IP探测周期, 默认 30s
-  --egress-prefer <4|6|auto>  本机出口优先级, 默认 6 (6→4; auto为并发HappyEyeballs) (别名 --prefer)
+  --egress-prefer <4|6|auto|off>  本机出口优先级, 默认 6 (6→4; auto为并发HappyEyeballs; off强制远端) (别名 --prefer)
   --cluster-id <id>    集群节点ID (默认随机)
   --cluster-token <t>  集群鉴权token (常量时间比较)
   --cluster-listen <addr>  集群私有协议监听, 如 :9443
@@ -148,9 +148,9 @@ func main() {
 				i++
 				egressPrefer = extraArgs[i]
 				switch egressPrefer {
-				case "4", "6", "auto", "d4", "d6":
+				case "4", "6", "auto", "d4", "d6", "off":
 				default:
-					fmt.Fprintln(os.Stderr, "错误: --prefer/--egress-prefer 必须是 4/6/auto/d4/d6")
+					fmt.Fprintln(os.Stderr, "错误: --prefer/--egress-prefer 必须是 4/6/auto/d4/d6/off")
 					os.Exit(1)
 				}
 			}
@@ -283,7 +283,9 @@ func main() {
 	log.Printf("  监听: %s (单端口同时接受 IPv4/IPv6)", ln.Addr())
 	log.Printf("  后端: %s//%s  基础路径: %s", scheme, host, basePath)
 	var egressDesc string
-	if proxyURL != "" {
+	if egressPrefer == "off" {
+		egressDesc = "强制远端 (不走本地)"
+	} else if proxyURL != "" {
 		egressDesc = "代理出口 (优先代理, 不区分 4/6)"
 	} else {
 		switch egressPrefer {
