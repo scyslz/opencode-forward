@@ -17,9 +17,9 @@ if [ -n "${ZEN_VERSION:-}" ]; then
 	TAG="$ZEN_VERSION"
 elif [ -x "$BIN" ]; then
 	_ver=$("$BIN" --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
-	if [ -n "${_ver:-}" ]; then case "$_ver" in v*) TAG="$_ver" ;; *) TAG="v$_ver" ;; esac; else TAG="v1.18.43"; fi
+	if [ -n "${_ver:-}" ]; then case "$_ver" in v*) TAG="$_ver" ;; *) TAG="v$_ver" ;; esac; else TAG="v1.18.44"; fi
 else
-	TAG="v1.18.43"
+	TAG="v1.18.44"
 fi
 
 BACKEND="${BACKEND:-https://opencode.ai/zen/v1}"
