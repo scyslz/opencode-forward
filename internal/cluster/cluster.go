@@ -397,8 +397,11 @@ func (n *Node) dispatchFrame(c net.Conn, isWS bool, head, body []byte, tunnelID 
 			packed = append(packed, rlb[:]...)
 			packed = append(packed, rfb...)
 			packed = append(packed, respBody...)
-			_ = n.writeConn(c, packed)
-			log.Printf("[cluster] send pong id=%s to %s tunnel=%s", wf.ID, c.RemoteAddr(), tunnelID)
+			if err := n.writeConn(c, packed); err != nil {
+				log.Printf("[cluster] ping-pong %s tunnel=%s PONG FAIL: %v", c.RemoteAddr(), tunnelID, err)
+			} else {
+				log.Printf("[cluster] ping-pong %s tunnel=%s PONG OK", c.RemoteAddr(), tunnelID)
+			}
 		}
 		return
 	}
@@ -1016,6 +1019,8 @@ func (n *Node) handleConn(c net.Conn, isWS bool, tunnelID string) {
 		_ = tcp.SetKeepAlive(true)
 		_ = tcp.SetKeepAlivePeriod(n.keepAlive)
 	}
+	pingTimes := map[string]time.Time{}
+	var pingMu sync.Mutex
 	go func() {
 		if !strings.HasPrefix(tunnelID, "join-") {
 			return
@@ -1023,10 +1028,24 @@ func (n *Node) handleConn(c net.Conn, isWS bool, tunnelID string) {
 		ticker := time.NewTicker(20 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			data := pingFrame()
-			log.Printf("[cluster] send ping to %s tunnel=%s", c.RemoteAddr(), tunnelID)
+			now := time.Now()
+			pingMu.Lock()
+			for id, t0 := range pingTimes {
+				if now.Sub(t0) > 15*time.Second {
+					delete(pingTimes, id)
+					log.Printf("[cluster] ping-pong %s tunnel=%s FAIL: timeout id=%s elapsed=%dms", c.RemoteAddr(), tunnelID, id, now.Sub(t0).Milliseconds())
+				}
+			}
+			pingMu.Unlock()
+			pid, data := pingFrameWithID()
+			pingMu.Lock()
+			pingTimes[pid] = now
+			pingMu.Unlock()
 			if err := n.writeConn(c, data); err != nil {
-				log.Printf("[cluster] ping failed to %s: %v", c.RemoteAddr(), err)
+				pingMu.Lock()
+				delete(pingTimes, pid)
+				pingMu.Unlock()
+				log.Printf("[cluster] ping-pong %s tunnel=%s FAIL: %v (发送失败)", c.RemoteAddr(), tunnelID, err)
 				return
 			}
 		}
@@ -1070,11 +1089,18 @@ func (n *Node) handleConn(c net.Conn, isWS bool, tunnelID string) {
 		if err := json.Unmarshal(head, &peek); err != nil {
 			continue
 		}
-		if peek.Path == PingPath && peek.StatusCode == nil {
-			log.Printf("[cluster] recv ping id=%s from %s tunnel=%s (raw)", peek.ID, c.RemoteAddr(), tunnelID)
-		}
 		if peek.StatusCode != nil && strings.HasPrefix(peek.ID, "ping-") {
-			log.Printf("[cluster] recv pong id=%s from %s tunnel=%s (raw)", peek.ID, c.RemoteAddr(), tunnelID)
+			pingMu.Lock()
+			t0, ok := pingTimes[peek.ID]
+			if ok {
+				delete(pingTimes, peek.ID)
+			}
+			pingMu.Unlock()
+			if ok {
+				log.Printf("[cluster] ping-pong %s tunnel=%s OK rtt=%dms", c.RemoteAddr(), tunnelID, time.Since(t0).Milliseconds())
+			}
+			n.dispatchFrame(c, isWS, head, body, tunnelID)
+			continue
 		}
 		if peek.IsChunk || peek.Done || peek.StatusCode != nil || peek.Path == PingPath {
 			n.dispatchFrame(c, isWS, head, body, tunnelID)
@@ -1544,9 +1570,10 @@ func handleClusterHTTP(w http.ResponseWriter, r *http.Request, node *Node) bool 
 	return false
 }
 
-func pingFrame() []byte {
+func pingFrameWithID() (string, []byte) {
+	id := "ping-" + util.RandomHex(4)
 	wf := WireFrame{
-		ID:   "ping-" + util.RandomHex(4),
+		ID:   id,
 		Path: PingPath,
 	}
 	b, _ := json.Marshal(wf)
@@ -1555,5 +1582,5 @@ func pingFrame() []byte {
 	out := make([]byte, 0, 4+len(b))
 	out = append(out, lb[:]...)
 	out = append(out, b...)
-	return out
+	return id, out
 }
