@@ -496,8 +496,15 @@ func (p *Proxy) HandleClusterForward(r *http.Request) (*http.Response, error) {
 	if r.Body != nil {
 		body, _ = io.ReadAll(r.Body)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), util.UpstreamTimeout)
-	defer cancel()
+	isStream := isStreamRequest(body)
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if isStream {
+		ctx = context.Background()
+	} else {
+		ctx, cancel = context.WithTimeout(context.Background(), util.UpstreamTimeout)
+		defer cancel()
+	}
 	if resp, err := p.tryLocal(ctx, r, body); err == nil {
 		if p.cfg.Dump {
 			dumpResponse(resp, fmt.Sprintf("集群代理响应 %s (本节点转发)", r.URL.Path), p.cfg.Verbose)
