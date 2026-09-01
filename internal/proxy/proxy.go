@@ -114,6 +114,21 @@ func isStreamRequest(body []byte) bool {
 	return false
 }
 
+func isLocalRetryStatus(code int) bool {
+	switch code {
+	case 403, 429, 502, 503, 504:
+		return true
+	}
+	return false
+}
+
+func (p *Proxy) shouldRetryLocal(code int) bool {
+	if p.cluster != nil && p.cluster.Enabled() {
+		return p.cluster.ShouldFailover(code, false)
+	}
+	return isLocalRetryStatus(code)
+}
+
 func dumpRequest(r *http.Request, withBody bool) {
 	var b strings.Builder
 	b.WriteString("\n----- 入站原始请求 -----\n")
@@ -680,7 +695,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				case res := <-ch:
 					if res.err != nil {
 						isTO := strings.Contains(res.err.Error(), "timeout") || strings.Contains(res.err.Error(), "deadline")
-						if isTO && p.cluster != nil && !p.cluster.ShouldFailover(0, true) {
+						if p.cluster != nil && p.cluster.Enabled() && isTO && !p.cluster.ShouldFailover(0, true) {
 							lastErr = res.err
 							return nil, false
 						}
@@ -689,14 +704,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						fails++
 						continue
 					}
-					shouldFail := p.cluster != nil && p.cluster.ShouldFailover(res.resp.StatusCode, false)
+					shouldFail := p.shouldRetryLocal(res.resp.StatusCode)
 					if shouldFail {
 						p.egress.MarkUnavailable(res.fam, false)
 						lastResp = res.resp
 						b, _ := io.ReadAll(res.resp.Body)
 						res.resp.Body.Close()
 						lastResp.Body = io.NopCloser(bytes.NewReader(b))
-						log.Printf("[failover] 本地 IPv%s 返回 %d 可 failover, 尝试对端转发", res.fam, res.resp.StatusCode)
+						if p.cluster != nil && p.cluster.Enabled() {
+							log.Printf("[failover] 本地 IPv%s 返回 %d 可 failover, 尝试对端转发", res.fam, res.resp.StatusCode)
+						} else {
+							log.Printf("[retry] 本地 IPv%s 返回 %d 可重试, 尝试备用出口", res.fam, res.resp.StatusCode)
+						}
 						fails++
 						if fails >= 2 {
 							return nil, false
@@ -740,7 +759,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			if err != nil {
 				isTO := strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline")
-				if isTO && p.cluster != nil && !p.cluster.ShouldFailover(0, true) {
+				if p.cluster != nil && p.cluster.Enabled() && isTO && !p.cluster.ShouldFailover(0, true) {
 					lastErr = err
 					return nil, false
 				}
@@ -748,8 +767,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				lastErr = err
 				continue
 			}
-			shouldFail := p.cluster != nil && p.cluster.ShouldFailover(resp.StatusCode, false)
-			if shouldFail {
+			if p.shouldRetryLocal(resp.StatusCode) {
 				p.egress.MarkUnavailable(fam, false)
 				lastResp = resp
 				b, _ := io.ReadAll(resp.Body)
@@ -757,7 +775,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				lastResp.Body = io.NopCloser(bytes.NewReader(b))
 				hdr := lastResp.Header
 				_ = hdr
-				log.Printf("[failover] 本地 IPv%s 返回 %d 可 failover, 尝试对端转发", fam, resp.StatusCode)
+				if p.cluster != nil && p.cluster.Enabled() {
+					log.Printf("[failover] 本地 IPv%s 返回 %d 可 failover, 尝试对端转发", fam, resp.StatusCode)
+				} else {
+					log.Printf("[retry] 本地 IPv%s 返回 %d 可重试, 尝试备用出口", fam, resp.StatusCode)
+				}
 				continue
 			}
 			p.egress.MarkAvailable(fam)
@@ -786,13 +808,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				lastErr = err
 				continue
 			}
-			shouldFail := p.cluster != nil && p.cluster.ShouldFailover(resp.StatusCode, false)
-			if shouldFail {
+			if p.shouldRetryLocal(resp.StatusCode) {
 				lastResp = resp
 				b, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				lastResp.Body = io.NopCloser(bytes.NewReader(b))
-				log.Printf("[failover] 备用 IPv%s 亦 %d 可 failover", fam, resp.StatusCode)
+				if p.cluster != nil && p.cluster.Enabled() {
+					log.Printf("[failover] 备用 IPv%s 亦 %d 可 failover", fam, resp.StatusCode)
+				} else {
+					log.Printf("[retry] 备用 IPv%s 亦 %d 可重试但已无更多出口", fam, resp.StatusCode)
+				}
 				continue
 			}
 			p.egress.MarkAvailable(fam)
