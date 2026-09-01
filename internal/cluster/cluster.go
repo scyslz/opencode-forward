@@ -473,6 +473,7 @@ func (n *Node) dispatchFrame(c net.Conn, isWS bool, head, body []byte, tunnelID 
 	if resp != nil && resp.Body != nil {
 		respBody, _ = io.ReadAll(resp.Body)
 		resp.Body.Close()
+		log.Printf("[cluster] forward result id=%s status=%d bodyLen=%d err=%v", h.ID, func() int { if resp != nil { return resp.StatusCode }; return 0 }(), len(respBody), ferr)
 	}
 	var hdrs map[string][]string
 	if resp != nil {
@@ -1338,6 +1339,7 @@ func buildStaticResponse(pr pendingResp) *http.Response {
 	if pr.rf.BodyLen > 0 {
 		respBody = pr.body
 	}
+	log.Printf("[cluster] buildStaticResponse id=%s status=%d bodyLen=%d hdr=%v", pr.rf.ID, pr.rf.StatusCode, len(respBody), hdr)
 	return &http.Response{StatusCode: pr.rf.StatusCode, Header: hdr, Body: io.NopCloser(bytes.NewReader(respBody))}
 }
 

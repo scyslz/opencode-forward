@@ -747,14 +747,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			log.Printf("[failover] 对端 %s 成功 %d", peer.Addr, resp.StatusCode)
-			defer resp.Body.Close()
+			nb, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			log.Printf("[cluster] forward response bodyLen=%d for %s", len(nb), r.URL.Path)
 			for k, vv := range resp.Header {
 				for _, v := range vv {
 					w.Header().Add(k, v)
 				}
 			}
 			w.WriteHeader(resp.StatusCode)
-			_, _ = io.Copy(w, resp.Body)
+			_, _ = w.Write(nb)
 			return
 		}
 	}
