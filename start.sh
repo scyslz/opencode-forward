@@ -10,7 +10,7 @@
 set -u
 
 REPO="scyslz/opencode-forward"
-TAG="${ZEN_VERSION:-v1.18.40}"
+TAG="${ZEN_VERSION:-v1.18.41}"
 SELF="$(readlink -f "$0")"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$DIR/opencode-zen-proxy"
@@ -262,7 +262,6 @@ summary() {
 }
 
 prepare() {
-    check_new_version
     ensure_binary
     mkdir -p "$LOG_DIR"
     rotate_logs
@@ -328,10 +327,10 @@ cmd_status() {
 }
 
 case "${1:-start}" in
-    start)     if is_running; then check_new_version; if [ -n "${TAG_UPDATED:-}" ]; then echo "New version $TAG detected, restarting ..."; do_stop; sleep 1; cmd_start_bg; else echo "Already running (pid $(cat "$PIDFILE"))"; exit 0; fi; else cmd_start_bg; fi ;;
-    run|-f|fg) is_running && { echo "Already running (pid $(cat "$PIDFILE")), stop first for foreground"; exit 0; }; cmd_run_fg ;;
+    start)     check_new_version; if is_running; then if [ -n "${TAG_UPDATED:-}" ]; then echo "New version $TAG detected, restarting ..."; do_stop; sleep 1; cmd_start_bg; else echo "Already running (pid $(cat "$PIDFILE"))"; exit 0; fi; else cmd_start_bg; fi ;;
+    run|-f|fg) check_new_version; is_running && { echo "Already running (pid $(cat "$PIDFILE")), stop first for foreground"; exit 0; }; cmd_run_fg ;;
     stop)      do_stop ;;
-    restart)   do_stop; sleep 1; cmd_start_bg ;;
+    restart)   check_new_version; do_stop; sleep 1; cmd_start_bg ;;
     status)    cmd_status ;;
     *)         echo "Usage: $0 [start|stop|restart|status|run]"; exit 1 ;;
 esac
