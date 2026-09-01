@@ -534,17 +534,58 @@ func (p *Proxy) HandleClusterForward(r *http.Request) (*http.Response, error) {
 
 func (p *Proxy) tryLocal(ctx context.Context, r *http.Request, body []byte) (*http.Response, error) {
 	order := p.egress.EgressOrder(r)
-	// egressOrder 已处理 X-Egress/d4/d6/auto，这里仅去重不可用栈
+	var lastResp *http.Response
 	var lastErr error
 	for _, fam := range order {
-		if p.egress.IsUnavailable(fam) && p.egress.IsStackDown(fam) {
+		if p.egress.IsUnavailable(fam) {
 			continue
 		}
-		if resp, err := p.doLocal(ctx, fam, r, body); err == nil {
-			return resp, nil
-		} else {
+		resp, err := p.doLocal(ctx, fam, r, body)
+		if err != nil {
+			p.egress.MarkUnavailable(fam, util.IsStackErrStatic(err))
 			lastErr = err
+			continue
 		}
+		if p.shouldRetryLocal(resp.StatusCode) {
+			p.egress.MarkUnavailable(fam, false)
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			resp.Body = io.NopCloser(bytes.NewReader(b))
+			lastResp = resp
+			lastErr = fmt.Errorf("status %d 可重试", resp.StatusCode)
+			continue
+		}
+		p.egress.MarkAvailable(fam)
+		return resp, nil
+	}
+	for _, fam := range order {
+		if !p.egress.IsUnavailable(fam) {
+			continue
+		}
+		if p.egress.IsStackDown(fam) {
+			continue
+		}
+		resp, err := p.doLocal(ctx, fam, r, body)
+		if err != nil {
+			if util.IsStackErrStatic(err) {
+				p.egress.MarkStackDown(fam, true)
+			}
+			lastErr = err
+			continue
+		}
+		if p.shouldRetryLocal(resp.StatusCode) {
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			resp.Body = io.NopCloser(bytes.NewReader(b))
+			lastResp = resp
+			lastErr = fmt.Errorf("status %d 可重试", resp.StatusCode)
+			continue
+		}
+		p.egress.MarkAvailable(fam)
+		return resp, nil
+	}
+	if lastResp != nil {
+		return nil, lastErr
 	}
 	if lastErr != nil {
 		return nil, lastErr
