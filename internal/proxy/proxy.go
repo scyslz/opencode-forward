@@ -400,8 +400,21 @@ func (p *Proxy) doLocal(ctx context.Context, fam string, in *http.Request, body 
 	if err != nil {
 		return nil, err
 	}
+	isStreamResp := strings.Contains(resp.Header.Get("Content-Type"), "event-stream")
+	shouldBuffer := !isStream && !isStreamResp
 	if p.cfg.Dump {
 		dumpResponse(resp, fmt.Sprintf("本地 IPv%s 响应 %s", fam, in.URL.Path), p.cfg.Verbose)
+	}
+	if shouldBuffer && resp.Body != nil {
+		nb, rerr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if rerr != nil {
+			return nil, rerr
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(nb))
+		resp.ContentLength = int64(len(nb))
+		resp.Header.Del("Transfer-Encoding")
+		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(nb)))
 	}
 	if p.cfg.Verbose {
 		log.Printf("[opencode-proxy] %s %s%s -> IPv%s session:%q->%q status=%d stream=%v ct=%q cl=%d", in.Method, p.cfg.BackendURL, in.URL.Path, fam, incomingSession, outSession, resp.StatusCode, isStream, resp.Header.Get("Content-Type"), resp.ContentLength)
