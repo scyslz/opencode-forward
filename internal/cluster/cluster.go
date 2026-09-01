@@ -398,9 +398,9 @@ func (n *Node) dispatchFrame(c net.Conn, isWS bool, head, body []byte, tunnelID 
 			packed = append(packed, rfb...)
 			packed = append(packed, respBody...)
 			if err := n.writeConn(c, packed); err != nil {
-				log.Printf("[cluster] ping-pong %s tunnel=%s PONG FAIL: %v", c.RemoteAddr(), tunnelID, err)
+				util.LogDebugf("[cluster] ping-pong %s tunnel=%s PONG FAIL: %v", c.RemoteAddr(), tunnelID, err)
 			} else {
-				log.Printf("[cluster] ping-pong %s tunnel=%s PONG OK", c.RemoteAddr(), tunnelID)
+				util.LogDebugf("[cluster] ping-pong %s tunnel=%s PONG OK", c.RemoteAddr(), tunnelID)
 			}
 		}
 		return
@@ -1365,7 +1365,7 @@ func buildStaticResponse(pr pendingResp) *http.Response {
 	if pr.rf.BodyLen > 0 {
 		respBody = pr.body
 	}
-	log.Printf("[cluster] buildStaticResponse id=%s status=%d bodyLen=%d hdr=%v", pr.rf.ID, pr.rf.StatusCode, len(respBody), hdr)
+	util.LogDebugf("[cluster] buildStaticResponse id=%s status=%d bodyLen=%d", pr.rf.ID, pr.rf.StatusCode, len(respBody))
 	return &http.Response{StatusCode: pr.rf.StatusCode, Header: hdr, Body: io.NopCloser(bytes.NewReader(respBody))}
 }
 
