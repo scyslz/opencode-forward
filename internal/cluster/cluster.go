@@ -255,11 +255,17 @@ func genSelfSignedCert() (tls.Certificate, error) {
 }
 
 func (n *Node) Enabled() bool {
+	if n.cfg.Token == "" {
+		return false
+	}
 	return n.cfg.ListenAddr != "" || n.cfg.JoinAddr != ""
 }
 
 func (n *Node) Start(forward func(r *http.Request) (*http.Response, error)) error {
 	n.onForward = forward
+	if n.cfg.Token == "" {
+		return nil
+	}
 	if n.keepAlive <= 0 {
 		n.keepAlive = 60 * time.Second
 	}

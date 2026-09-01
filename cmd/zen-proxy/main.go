@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	version          = "1.18.33"
+	version          = "1.18.34"
 	defaultUserAgent = "opencode/" + version + " ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 	defaultClient    = "cli"
 	defaultProject   = "global"
@@ -299,7 +299,7 @@ func main() {
 	} else {
 		log.Printf("  出口策略: %s (X-Egress 头可覆盖) | 失败冷却 %s | 探测间隔 %s", egressDesc, egress.UnavailableCool, probeInterval)
 	}
-	if clusterCfg.JoinAddr != "" || clusterCfg.ListenAddr != "" {
+	if clusterCfg.Token != "" && (clusterCfg.JoinAddr != "" || clusterCfg.ListenAddr != "") {
 		log.Printf("  集群兜底: 双栈均失败时转发至对端 (join=%s listen=%s)", clusterCfg.JoinAddr, clusterCfg.ListenAddr)
 	} else {
 		log.Printf("  集群兜底: 未启用 (双栈均失败则直接返回错误, 可用 --cluster-join/--cluster-listen 启用)")
