@@ -182,6 +182,46 @@ func dumpOutbound(r *http.Request, body []byte, nsKey, inSess, outSess string, w
 	log.Print(b.String())
 }
 
+func dumpResponse(resp *http.Response, prefix string, withBody bool) {
+	if resp == nil {
+		log.Printf("%s <nil>", prefix)
+		return
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n----- %s -----\n", prefix)
+	fmt.Fprintf(&b, "HTTP %d %s\n", resp.StatusCode, resp.Status)
+	keys := make([]string, 0, len(resp.Header))
+	for k := range resp.Header {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		for _, v := range resp.Header[k] {
+			fmt.Fprintf(&b, "%s: %s\n", k, v)
+		}
+	}
+	if withBody && resp.Body != nil {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		if len(body) > 0 {
+			if len(body) > 4096 {
+				b.WriteString(fmt.Sprintf("\nBODY [%d bytes, truncated]:\n", len(body)))
+				b.WriteString(string(body[:4096]) + "\n...[truncated]\n")
+			} else {
+				b.WriteString("\nBODY:\n" + string(body) + "\n")
+			}
+		}
+	} else if resp.Body != nil {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		if len(body) > 0 {
+			fmt.Fprintf(&b, "\n[BODY %d bytes, 需 VERBOSE=1 查看详情]\n", len(body))
+		}
+	}
+	b.WriteString(fmt.Sprintf("----- %s end -----", prefix))
+	log.Print(b.String())
+}
+
 type Config struct {
 	Scheme       string
 	Host         string
@@ -360,6 +400,9 @@ func (p *Proxy) doLocal(ctx context.Context, fam string, in *http.Request, body 
 	if err != nil {
 		return nil, err
 	}
+	if p.cfg.Dump {
+		dumpResponse(resp, fmt.Sprintf("本地 IPv%s 响应 %s", fam, in.URL.Path), p.cfg.Verbose)
+	}
 	if p.cfg.Verbose {
 		log.Printf("[opencode-proxy] %s %s%s -> IPv%s session:%q->%q status=%d stream=%v ct=%q cl=%d", in.Method, p.cfg.BackendURL, in.URL.Path, fam, incomingSession, outSession, resp.StatusCode, isStream, resp.Header.Get("Content-Type"), resp.ContentLength)
 	}
@@ -374,6 +417,9 @@ func (p *Proxy) HandleClusterForward(r *http.Request) (*http.Response, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), util.UpstreamTimeout)
 	defer cancel()
 	if resp, err := p.tryLocal(ctx, r, body); err == nil {
+		if p.cfg.Dump {
+			dumpResponse(resp, fmt.Sprintf("集群代理响应 %s (本节点转发)", r.URL.Path), p.cfg.Verbose)
+		}
 		return resp, nil
 	} else if p.cluster == nil || !p.cluster.Enabled() {
 		return nil, err
@@ -749,6 +795,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[failover] 对端 %s 成功 %d", peer.Addr, resp.StatusCode)
 			nb, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			if p.cfg.Dump {
+				respD := &http.Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: io.NopCloser(bytes.NewReader(nb))}
+				dumpResponse(respD, fmt.Sprintf("集群对端响应 %s", r.URL.Path), p.cfg.Verbose)
+			}
 			preview := nb
 			if len(preview) > 200 {
 				preview = preview[:200]

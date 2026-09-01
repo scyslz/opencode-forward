@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	version            = "1.18.49"
+	version            = "1.18.50"
 	opencodeCliVersion = "1.18.24"
 	defaultUserAgent   = "opencode/" + opencodeCliVersion + " ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 	defaultClient      = "cli"
@@ -52,6 +52,7 @@ func usage() {
   --verbose            打印每条请求日志 (等价 --log-level debug)
   --log-level <lv>     日志级别 debug/info/warn/error (默认 info; 集群重试/ping仅debug)
   --dump               打印完整转发请求特征: 全部 header + body
+  --verbose --dump     响应也打印 header + body (body >4KB 截断)
   --model <名称>        替换请求体 JSON 的 "model" 字段 (空=不替换, 默认)
   --outbound-auth <token>  转发给后端 Authorization: Bearer <token>
   --inbound-auth <token>   客户端访问本服务需带 Authorization: Bearer <token>
