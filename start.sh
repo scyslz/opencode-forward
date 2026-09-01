@@ -17,9 +17,9 @@ if [ -n "${ZEN_VERSION:-}" ]; then
 	TAG="$ZEN_VERSION"
 elif [ -x "$BIN" ]; then
 	_ver=$("$BIN" --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
-	if [ -n "${_ver:-}" ]; then case "$_ver" in v*) TAG="$_ver" ;; *) TAG="v$_ver" ;; esac; else TAG="v1.18.42"; fi
+	if [ -n "${_ver:-}" ]; then case "$_ver" in v*) TAG="$_ver" ;; *) TAG="v$_ver" ;; esac; else TAG="v1.18.43"; fi
 else
-	TAG="v1.18.42"
+	TAG="v1.18.43"
 fi
 
 BACKEND="${BACKEND:-https://opencode.ai/zen/v1}"
@@ -61,6 +61,10 @@ check_new_version() {
     latest=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
     [ -z "$latest" ] && return 0
     if [ "$latest" != "$TAG" ]; then
+        _cur="${TAG#v}"; _lat="${latest#v}"
+        if [ "$(printf '%s\n%s\n' "$_cur" "$_lat" | sort -V | head -n1)" = "$_lat" ] && [ "$_cur" != "$_lat" ]; then
+            return 0
+        fi
         echo "New version available: $latest (current $TAG)" >&2
         if [ "${ZEN_AUTO_UPDATE:-0}" = "1" ]; then
             echo "Auto-updating to $latest ..." >&2
