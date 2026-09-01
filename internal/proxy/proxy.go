@@ -419,7 +419,40 @@ func rewriteBodyModel(body []byte, model string) ([]byte, bool) {
 	return nb, true
 }
 
+type statusRecorder struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	if !r.wroteHeader {
+		r.status = code
+		r.wroteHeader = true
+		r.ResponseWriter.WriteHeader(code)
+	}
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	if !r.wroteHeader {
+		r.WriteHeader(200)
+	}
+	return r.ResponseWriter.Write(b)
+}
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	rec := &statusRecorder{ResponseWriter: w, status: 200}
+	defer func() {
+		log.Printf("[proxy] %s %d %s", r.URL.Path, rec.status, time.Since(start).Truncate(time.Millisecond))
+	}()
+	w = rec
 	if p.cluster != nil && (p.cluster.IsInternalPath(r.URL.Path) || r.URL.Path == "/_cluster/peers") {
 		if p.cluster.HandleHTTP(w, r) {
 			return
