@@ -17,9 +17,10 @@ if [ -n "${ZEN_VERSION:-}" ]; then
 	TAG="$ZEN_VERSION"
 elif [ -x "$BIN" ]; then
 	_ver=$("$BIN" --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
-	if [ -n "${_ver:-}" ]; then case "$_ver" in v*) TAG="$_ver" ;; *) TAG="v$_ver" ;; esac; else TAG="v1.18.44"; fi
+	if [ -n "${_ver:-}" ]; then case "$_ver" in v*) TAG="$_ver" ;; *) TAG="v$_ver" ;; esac; else TAG=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4); [ -z "${TAG:-}" ] && { echo "无法获取最新版本且本地BIN版本解析失败" >&2; exit 1; }; fi
 else
-	TAG="v1.18.44"
+	TAG=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
+	[ -z "${TAG:-}" ] && { echo "无法获取最新版本（网络失败）" >&2; exit 1; }
 fi
 
 BACKEND="${BACKEND:-https://opencode.ai/zen/v1}"
