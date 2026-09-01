@@ -10,7 +10,7 @@
 set -u
 
 REPO="scyslz/opencode-forward"
-TAG="${ZEN_VERSION:-v1.18.39}"
+TAG="${ZEN_VERSION:-v1.18.40}"
 SELF="$(readlink -f "$0")"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$DIR/opencode-zen-proxy"

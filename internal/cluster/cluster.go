@@ -942,6 +942,14 @@ func (n *Node) probeLoop() {
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
 	for range t.C {
+		if n.cfg.JoinAddr != "" {
+			n.joinMu.Lock()
+			jc := n.joinConn
+			n.joinMu.Unlock()
+			if jc == nil {
+				continue
+			}
+		}
 		n.mu.RLock()
 		list := make([]*Peer, 0, len(n.peers))
 		for _, p := range n.peers {
