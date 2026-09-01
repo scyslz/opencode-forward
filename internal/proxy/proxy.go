@@ -875,6 +875,45 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			log.Printf("[failover] 对端 %s 成功 %d", peer.Addr, resp.StatusCode)
+			isStreamPeer := isStreamRequest(body) && resp.StatusCode == 200 && strings.Contains(resp.Header.Get("Content-Type"), "event-stream")
+			if isStreamPeer {
+				if p.cfg.Dump {
+					dumpResponse(resp, fmt.Sprintf("集群对端响应 %s", r.URL.Path), false)
+				}
+				for k, vv := range resp.Header {
+					if strings.EqualFold(k, "Content-Length") {
+						continue
+					}
+					for _, v := range vv {
+						w.Header().Add(k, v)
+					}
+				}
+				w.Header().Del("Content-Length")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+				w.WriteHeader(resp.StatusCode)
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				notify := r.Context().Done()
+				done := make(chan error, 1)
+				go func() {
+					_, err := io.Copy(w, resp.Body)
+					done <- err
+				}()
+				select {
+				case <-notify:
+					resp.Body.Close()
+					log.Printf("[sse] 集群对端流 客户端断开, 中止")
+					return
+				case err := <-done:
+					resp.Body.Close()
+					if err != nil {
+						log.Printf("[sse] 集群对端流结束 err=%v", err)
+					}
+					return
+				}
+			}
 			nb, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if p.cfg.Dump {
