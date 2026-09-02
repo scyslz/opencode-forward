@@ -178,7 +178,7 @@ func ParseClusterArgs(args []string) (Config, []string) {
 			if i+1 < len(args) {
 				i++
 			}
-			log.Printf("[cluster] --peer 已移除, 请用 --cluster-join/--cluster-listen (隧道模式)")
+			log.Printf("[cluster] --peer removed, use --cluster-join/--cluster-listen (tunnel mode)")
 		case "--failover-on":
 			if i+1 < len(args) {
 				i++
@@ -215,7 +215,7 @@ func NewNode(cfg Config) *Node {
 	}
 	cert, err := genSelfSignedCert()
 	if err != nil {
-		log.Printf("[cluster] 生成内存自签证书失败, 退化为明文: %v", err)
+		log.Printf("[cluster] failed to generate self-signed cert, fallback to plaintext: %v", err)
 	}
 	tlsCfg := &tls.Config{
 		InsecureSkipVerify: true,
@@ -439,10 +439,10 @@ func (n *Node) dispatchFrame(c net.Conn, isWS bool, head, body []byte, tunnelID 
 	var resp *http.Response
 	var ferr error
 	if n.onForward == nil {
-		log.Printf("[cluster] 服务端未配置转发器, 丢弃帧 id=%s method=%s path=%s", h.ID, h.Method, h.Path)
-		ferr = fmt.Errorf("服务端未配置转发器, 无法处理集群帧")
+		util.LogDebugf("[cluster] no forwarder, dropping frame id=%s method=%s path=%s", h.ID, h.Method, h.Path)
+		ferr = fmt.Errorf("no forwarder, cannot handle cluster frame")
 	} else {
-		log.Printf("[cluster] 转发请求 id=%s method=%s path=%s headers=%v stream=%v", h.ID, fwdReq.Method, fwdReq.URL.RequestURI(), fwdReq.Header, wf.Stream)
+		util.LogDebugf("[cluster] forward request id=%s method=%s path=%s stream=%v", h.ID, fwdReq.Method, fwdReq.URL.RequestURI(), wf.Stream)
 		resp, ferr = n.onForward(fwdReq)
 	}
 	if wf.Stream && resp != nil && ferr == nil && resp.StatusCode == 200 && isSSEHeader(resp.Header) {
@@ -476,7 +476,7 @@ func (n *Node) dispatchFrame(c net.Conn, isWS bool, head, body []byte, tunnelID 
 	if resp != nil && resp.Body != nil {
 		respBody, _ = io.ReadAll(resp.Body)
 		resp.Body.Close()
-		log.Printf("[cluster] forward result id=%s status=%d bodyLen=%d err=%v", h.ID, func() int { if resp != nil { return resp.StatusCode }; return 0 }(), len(respBody), ferr)
+		util.LogDebugf("[cluster] forward result id=%s status=%d bodyLen=%d err=%v", h.ID, func() int { if resp != nil { return resp.StatusCode }; return 0 }(), len(respBody), ferr)
 	}
 	var hdrs map[string][]string
 	if resp != nil {
@@ -565,9 +565,9 @@ func (n *Node) acceptLoop() {
 			return
 		}
 		remote := c.RemoteAddr().String()
-		log.Printf("[cluster] 收到入站连接: from=%s local=%s", remote, c.LocalAddr())
+		util.LogDebugf("[cluster] inbound connection from=%s local=%s", remote, c.LocalAddr())
 
-		// 简单的 HTTP/WS 握手嗅探 (Peek 限时, 防连接后不发数据的连接阻塞 acceptLoop)
+		// WS handshake sniff (peek with timeout to avoid blocking acceptLoop)
 		br := bufio.NewReader(c)
 		_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
 		peek, perr := br.Peek(4)
@@ -590,14 +590,14 @@ func (n *Node) acceptLoop() {
 				}
 				ws, err := wsUpgrader.Upgrade(&fakeResponseWriter{conn: c, br: br}, req, nil)
 				if err != nil {
-					log.Printf("[cluster] WS 升级失败: from=%s err=%v", remote, err)
+					log.Printf("[cluster] WS upgrade failed from=%s err=%v", remote, err)
 					c.Close()
 					return
 				}
 				conn := &wsConnWrapper{conn: ws}
 				peerNodeID, vErr := n.verifyHandshake(conn, true)
 				if vErr != nil {
-					log.Printf("[cluster] WSS 握手被拒: from=%s err=%v", remote, vErr)
+					log.Printf("[cluster] WSS handshake rejected from=%s err=%v", remote, vErr)
 					_ = conn.Close()
 					return
 				}
@@ -625,7 +625,7 @@ func (n *Node) acceptLoop() {
 			continue
 		}
 
-		// 原生 TCP 隧道
+		// raw TCP tunnel
 		wrapped := &tcpConnWrapper{Conn: c, Reader: io.MultiReader(br, c)}
 		go n.handleRawConn(wrapped, func(conn net.Conn, tid string) {
 			n.handleConn(conn, false, tid)
@@ -633,7 +633,7 @@ func (n *Node) acceptLoop() {
 			delete(n.peers, conn.RemoteAddr().String())
 			n.mu.Unlock()
 			n.inboundConns.Delete(conn.RemoteAddr().String())
-			util.LogDebugf("[cluster] 隧道下线剔除: %s", conn.RemoteAddr())
+			util.LogDebugf("[cluster] tunnel offline removed: %s", conn.RemoteAddr())
 		})
 	}
 }
@@ -648,7 +648,7 @@ func (n *Node) handleRawConn(c net.Conn, onDone func(net.Conn, string)) {
 	if tlsConn, ok := underlying.(*tls.Conn); ok {
 		_ = c.SetDeadline(time.Now().Add(10 * time.Second))
 		if hErr := tlsConn.Handshake(); hErr != nil {
-			log.Printf("[cluster] 接受连接 TLS握手失败: %v", hErr)
+			log.Printf("[cluster] TLS handshake failed: %v", hErr)
 			_ = c.Close()
 			return
 		}
@@ -656,13 +656,13 @@ func (n *Node) handleRawConn(c net.Conn, onDone func(net.Conn, string)) {
 	}
 	peerNodeID, err := n.verifyHandshake(c, false)
 	if err != nil {
-		log.Printf("[cluster] 匿名裸TCP 连接被拒绝: %v (from %s)", err, remote)
+		log.Printf("[cluster] anonymous TCP rejected: %v (from %s)", err, remote)
 		_ = c.Close()
 		return
 	}
 	tid := "in-" + util.RandomHex(4)
 	n.Tunnels.Open(tid, "inbound", "", remote, local)
-	log.Printf("[cluster] 接受隧道连接: id=%s remote=%s local=%s peerID=%s (服务端日志)", tid, remote, local, peerNodeID)
+	log.Printf("[cluster] tunnel accepted id=%s remote=%s local=%s peerID=%s", tid, remote, local, peerNodeID)
 	n.mu.Lock()
 	n.peers[remote] = &Peer{ID: remote, Addr: remote, RTTms: 9999, NodeID: peerNodeID, Dynamic: true}
 	n.mu.Unlock()
@@ -721,18 +721,18 @@ func (n *Node) handshake(c net.Conn, isWS bool) (string, error) {
 				return "", rerr
 			}
 			if len(data) < 4 {
-				return "", fmt.Errorf("握手响应长度非法")
+				return "", fmt.Errorf("invalid handshake response length")
 			}
 			hl := binary.BigEndian.Uint32(data[:4])
 			if hl == 0 || hl > 1<<10 || int(hl)+4 > len(data) {
-				return "", fmt.Errorf("握手响应长度非法")
+				return "", fmt.Errorf("invalid handshake response length")
 			}
 			var resp WireFrame
 			if err2 := json.Unmarshal(data[4:4+hl], &resp); err2 != nil {
 				return "", err2
 			}
 			if resp.AuthToken != "ok" {
-				return "", fmt.Errorf("握手被拒: %s", resp.AuthToken)
+				return "", fmt.Errorf("handshake rejected: %s", resp.AuthToken)
 			}
 			return resp.NodeID, nil
 		}
@@ -751,7 +751,7 @@ func (n *Node) handshake(c net.Conn, isWS bool) (string, error) {
 		return "", err
 	}
 	if l <= 0 || l > 1<<10 {
-		return "", fmt.Errorf("握手响应长度非法")
+		return "", fmt.Errorf("invalid handshake response length")
 	}
 	rb := make([]byte, l)
 	if _, err = io.ReadFull(c, rb); err != nil {
@@ -763,7 +763,7 @@ func (n *Node) handshake(c net.Conn, isWS bool) (string, error) {
 		return "", err
 	}
 	if resp.AuthToken != "ok" {
-		return "", fmt.Errorf("握手被拒: %s", resp.AuthToken)
+		return "", fmt.Errorf("handshake rejected: %s", resp.AuthToken)
 	}
 	return resp.NodeID, nil
 }
@@ -776,11 +776,11 @@ func (n *Node) verifyHandshake(c net.Conn, isWS bool) (string, error) {
 			return "", err
 		}
 		if len(data) < 4 {
-			return "", fmt.Errorf("握手长度非法")
+			return "", fmt.Errorf("invalid handshake length")
 		}
 		hl := binary.BigEndian.Uint32(data[:4])
 		if hl == 0 || hl > 1<<10 || int(hl)+4 > len(data) {
-			return "", fmt.Errorf("握手长度非法")
+			return "", fmt.Errorf("invalid handshake length")
 		}
 		var wf WireFrame
 		if err := json.Unmarshal(data[4:4+hl], &wf); err != nil {
@@ -788,7 +788,7 @@ func (n *Node) verifyHandshake(c net.Conn, isWS bool) (string, error) {
 		}
 		if !util.SecureCompare(wf.AuthToken, n.cfg.Token) {
 			_ = n.writeHandshakeWS(c, WireFrame{AuthToken: "unauthorized", NodeID: n.selfID})
-			return "", fmt.Errorf("token 不匹配")
+			return "", fmt.Errorf("token mismatch")
 		}
 		if err := n.writeHandshakeWS(c, WireFrame{AuthToken: "ok", NodeID: n.selfID}); err != nil {
 			return "", err
@@ -801,7 +801,7 @@ func (n *Node) verifyHandshake(c net.Conn, isWS bool) (string, error) {
 		return "", err
 	}
 	if l <= 0 || l > 1<<10 {
-		return "", fmt.Errorf("握手长度非法")
+		return "", fmt.Errorf("invalid handshake length")
 	}
 	rb := make([]byte, l)
 	if _, err := io.ReadFull(c, rb); err != nil {
@@ -814,7 +814,7 @@ func (n *Node) verifyHandshake(c net.Conn, isWS bool) (string, error) {
 	if !util.SecureCompare(wf.AuthToken, n.cfg.Token) {
 		fail := WireFrame{AuthToken: "unauthorized", NodeID: n.selfID}
 		_ = n.writeHandshakeTCP(c, fail)
-		return "", fmt.Errorf("token 不匹配")
+		return "", fmt.Errorf("token mismatch")
 	}
 	if err := n.writeHandshakeTCP(c, WireFrame{AuthToken: "ok", NodeID: n.selfID}); err != nil {
 		return "", err
@@ -863,7 +863,7 @@ func isAuthErr(err error) bool {
 		return false
 	}
 	s := err.Error()
-	return strings.Contains(s, "unauthorized") || strings.Contains(s, "token 不匹配") || strings.Contains(s, "握手被拒")
+	return strings.Contains(s, "unauthorized") || strings.Contains(s, "token mismatch") || strings.Contains(s, "handshake rejected")
 }
 
 func (n *Node) joinLoop() {
@@ -877,7 +877,7 @@ func (n *Node) joinLoop() {
 			tc, tcpErr := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", cleanAddr(n.cfg.JoinAddr), n.tlsCfg)
 			if tcpErr == nil {
 				if _, err = n.handshake(tc, false); err != nil {
-					log.Printf("[cluster] TCP Join %s 握手失败: %v", n.cfg.JoinAddr, err)
+					log.Printf("[cluster] TCP join %s handshake failed: %v", n.cfg.JoinAddr, err)
 					_ = tc.Close()
 					tcpErr = err
 				} else {
@@ -899,17 +899,17 @@ func (n *Node) joinLoop() {
 				if d > 3*time.Minute {
 					d = 3 * time.Minute
 				}
-				log.Printf("[cluster] Join %s 鉴权失败, %s后重试 (连续失败 %d 次)", n.cfg.JoinAddr, d, authFails)
+				log.Printf("[cluster] join %s auth failed, retry after %s (%d consecutive)", n.cfg.JoinAddr, d, authFails)
 				time.Sleep(d)
 			} else {
 				authFails = 0
-				util.LogThrottledf(n.cfg.JoinAddr+"-join", 30*time.Second, "[cluster] Join %s 失败: %v, 3s重试", n.cfg.JoinAddr, err)
+				util.LogThrottledf(n.cfg.JoinAddr+"-join", 30*time.Second, "[cluster] join %s failed: %v, retry in 3s", n.cfg.JoinAddr, err)
 				time.Sleep(3 * time.Second)
 			}
 			continue
 		}
 		authFails = 0
-		log.Printf("[cluster] 节点 %s 已加入 %s (keepalive=%s)", n.selfID, n.cfg.JoinAddr, n.keepAlive)
+		log.Printf("[cluster] node %s joined %s (keepalive=%s)", n.selfID, n.cfg.JoinAddr, n.keepAlive)
 		setTCPKeepAlive(c, n.keepAlive)
 		n.joinMu.Lock()
 		n.joinConn = c
@@ -919,7 +919,7 @@ func (n *Node) joinLoop() {
 		n.Tunnels.Open(tid, "outbound", "", n.cfg.JoinAddr, c.LocalAddr().String())
 		n.handleConn(c, isWS, tid)
 		n.Tunnels.Close(tid)
-		util.LogDebugf("[cluster] 节点 %s 与 %s 的连接已断开, 3s后重连", n.selfID, n.cfg.JoinAddr)
+		util.LogDebugf("[cluster] node %s connection to %s closed, reconnect in 3s", n.selfID, n.cfg.JoinAddr)
 		n.joinMu.Lock()
 		n.joinConn = nil
 		n.joinMu.Unlock()
@@ -991,9 +991,9 @@ func (n *Node) probeLoop() {
 					d := peerBackoffDuration(peer.FailCount)
 					peer.UnavailableUntil = time.Now().Add(d)
 					if err != nil {
-						util.LogDebugf("[cluster] ping peer %s fail (tunnel): %v, 标记不可用 %s (%d 次)", p.Addr, err, d, peer.FailCount)
+						util.LogDebugf("[cluster] ping peer %s fail (tunnel): %v, marked unavailable %s (%d)", p.Addr, err, d, peer.FailCount)
 					} else {
-						util.LogDebugf("[cluster] ping peer %s status=%d (tunnel), 标记不可用 %s (%d 次)", p.Addr, resp.StatusCode, d, peer.FailCount)
+						util.LogDebugf("[cluster] ping peer %s status=%d (tunnel), marked unavailable %s (%d)", p.Addr, resp.StatusCode, d, peer.FailCount)
 					}
 					n.mu.Unlock()
 					continue
@@ -1045,7 +1045,7 @@ func (n *Node) handleConn(c net.Conn, isWS bool, tunnelID string) {
 				pingMu.Lock()
 				delete(pingTimes, pid)
 				pingMu.Unlock()
-				log.Printf("[cluster] ping-pong %s tunnel=%s FAIL: %v (发送失败)", c.RemoteAddr(), tunnelID, err)
+				log.Printf("[cluster] ping-pong %s tunnel=%s FAIL send: %v", c.RemoteAddr(), tunnelID, err)
 				return
 			}
 		}
@@ -1186,7 +1186,7 @@ func (n *Node) ForwardToPeer(ctx context.Context, peer *Peer, orig *http.Request
 	if p := n.peers[peer.ID]; p != nil {
 		if err != nil {
 			s := err.Error()
-			isTO := strings.Contains(s, "timeout") || strings.Contains(s, "deadline") || strings.Contains(s, "超时")
+			isTO := strings.Contains(s, "timeout") || strings.Contains(s, "deadline")
 			if isTO || strings.Contains(s, "tunnel") {
 				p.FailCount++
 				p.UnavailableUntil = time.Now().Add(peerBackoffDuration(p.FailCount))
@@ -1206,7 +1206,7 @@ func (n *Node) ForwardCluster(ctx context.Context, r *http.Request, body []byte)
 	for _, v := range visitedIn {
 		visitedMap[strings.TrimSpace(v)] = true
 	}
-	// 已访问过本节点则跳过本节点，直接选下一未访问 peer
+	// already visited self, skip to next unvisited peer
 	if visitedMap[n.selfID] {
 		peers := n.PickPeers(visitedMap)
 		var lastErr error
@@ -1223,7 +1223,7 @@ func (n *Node) ForwardCluster(ctx context.Context, r *http.Request, body []byte)
 		if lastErr != nil {
 			return nil, lastErr
 		}
-		return nil, fmt.Errorf("无可用 peer")
+		return nil, fmt.Errorf("no available peer")
 	}
 	visited, hop := BuildVisited(n.selfID, visitedIn, hopIn)
 	if hop > MaxHop {
@@ -1245,7 +1245,7 @@ func (n *Node) ForwardCluster(ctx context.Context, r *http.Request, body []byte)
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, fmt.Errorf("无可用 peer")
+	return nil, fmt.Errorf("no available peer")
 }
 
 func (n *Node) forwardViaFrame(ctx context.Context, conn net.Conn, orig *http.Request, body []byte, visited []string, hop int) (*http.Response, error) {
@@ -1321,7 +1321,7 @@ func (n *Node) forwardViaFrame(ctx context.Context, conn net.Conn, orig *http.Re
 							return buildStreamResponse(pr.rf, streamCh, &first, cleanupPending), nil
 						case <-timeoutC:
 							cleanupPending()
-							return nil, fmt.Errorf("等待对端流式首包超时 (%s)", util.UpstreamTimeout)
+							return nil, fmt.Errorf("peer stream first packet timeout (%s)", util.UpstreamTimeout)
 						case <-ctx.Done():
 							cleanupPending()
 							return nil, ctx.Err()
@@ -1347,7 +1347,7 @@ func (n *Node) forwardViaFrame(ctx context.Context, conn net.Conn, orig *http.Re
 		return buildStaticResponse(pr), nil
 	case <-timeoutC:
 		cleanupPending()
-		return nil, fmt.Errorf("等待对端响应超时 (%s)", util.UpstreamTimeout)
+		return nil, fmt.Errorf("peer response timeout (%s)", util.UpstreamTimeout)
 	case <-ctx.Done():
 		cleanupPending()
 		return nil, ctx.Err()
@@ -1412,7 +1412,7 @@ func (n *Node) deliverChunk(id string, chunk []byte, done bool, status *int, hdr
 	}
 	if done {
 		if pe.overflow > 0 {
-			errMsg := fmt.Errorf("集群流被截断: 消费侧拥塞, 丢弃 %d 个数据块", pe.overflow)
+			errMsg := fmt.Errorf("cluster stream truncated: consumer congested, dropped %d chunks", pe.overflow)
 			select {
 			case pe.streamCh <- pendingResp{err: errMsg}:
 			default:
@@ -1447,12 +1447,12 @@ func (n *Node) failPending(c net.Conn) {
 			continue
 		}
 		select {
-		case pe.ch <- pendingResp{err: fmt.Errorf("集群隧道连接已关闭")}:
+		case pe.ch <- pendingResp{err: fmt.Errorf("cluster tunnel closed")}:
 		default:
 		}
 		if pe.streamCh != nil {
 			select {
-			case pe.streamCh <- pendingResp{err: fmt.Errorf("集群隧道连接已关闭")}:
+			case pe.streamCh <- pendingResp{err: fmt.Errorf("cluster tunnel closed")}:
 			default:
 			}
 		}

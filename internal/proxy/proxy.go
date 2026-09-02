@@ -104,7 +104,7 @@ func authSummary(authToken string) string {
 	if authToken != "" {
 		return "Bearer " + authToken
 	}
-	return "透传客户端Authorization"
+	return "forward client Authorization"
 }
 
 func isStreamRequest(body []byte) bool {
@@ -131,7 +131,7 @@ func (p *Proxy) shouldRetryLocal(code int) bool {
 
 func dumpRequest(r *http.Request, withBody bool) {
 	var b strings.Builder
-	b.WriteString("\n----- 入站原始请求 -----\n")
+	b.WriteString("\n----- inbound request -----\n")
 	fmt.Fprintf(&b, "%s %s HTTP/%d.%d\n", r.Method, r.URL.RequestURI(), r.ProtoMajor, r.ProtoMinor)
 	if r.Host != "" {
 		b.WriteString("Host: " + r.Host + "\n")
@@ -153,22 +153,22 @@ func dumpRequest(r *http.Request, withBody bool) {
 			b.WriteString("\nBODY:\n" + string(body) + "\n")
 		}
 	} else if !withBody && r.Body != nil {
-		// 仍需 peek 长度以提示但不打印内容，避免 Body 被消费
+		// peek length for hint without printing body, avoid consuming Body
 		body, _ := io.ReadAll(r.Body)
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		if len(body) > 0 {
-			fmt.Fprintf(&b, "\n[BODY %d bytes, 需 VERBOSE=1 查看详情]\n", len(body))
+			fmt.Fprintf(&b, "\n[BODY %d bytes, need VERBOSE=1 for details]\n", len(body))
 		}
 	}
-	b.WriteString("----- 入站 end -----")
+	b.WriteString("----- inbound end -----")
 	log.Print(b.String())
 }
 
 func dumpOutbound(r *http.Request, body []byte, nsKey, inSess, outSess string, withBody bool) {
 	var b strings.Builder
-	b.WriteString("\n----- 转发真实请求 -----\n")
+	b.WriteString("\n----- outbound request -----\n")
 	if nsKey != "" {
-		fmt.Fprintf(&b, "命名空间: %s  会话: %q -> %q\n", nsKey, inSess, outSess)
+		fmt.Fprintf(&b, "namespace: %s  session: %q -> %q\n", nsKey, inSess, outSess)
 	}
 	uri := r.URL.Path
 	if r.URL.RawQuery != "" {
@@ -191,9 +191,9 @@ func dumpOutbound(r *http.Request, body []byte, nsKey, inSess, outSess string, w
 	if withBody && len(body) > 0 {
 		b.WriteString("\nBODY:\n" + string(body) + "\n")
 	} else if !withBody && len(body) > 0 {
-		fmt.Fprintf(&b, "\n[BODY %d bytes, 需 VERBOSE=1 查看详情]\n", len(body))
+		fmt.Fprintf(&b, "\n[BODY %d bytes, need VERBOSE=1 for details]\n", len(body))
 	}
-	b.WriteString("----- 转发 end -----")
+	b.WriteString("----- outbound end -----")
 	log.Print(b.String())
 }
 
@@ -249,7 +249,7 @@ func dumpResponse(resp *http.Response, prefix string, withBody bool) {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body = io.NopCloser(bytes.NewReader(body))
 		if len(body) > 0 {
-			fmt.Fprintf(&b, "\n[BODY %d bytes, 需 VERBOSE=1 查看详情]\n", len(body))
+			fmt.Fprintf(&b, "\n[BODY %d bytes, need VERBOSE=1 for details]\n", len(body))
 		}
 	}
 	b.WriteString(fmt.Sprintf("----- %s end -----", prefix))
@@ -309,8 +309,8 @@ func isHopByHop(k string) bool {
 	return false
 }
 
-// passthroughHeader 白名单: 放行 opencode CLI 真实会发送的头 + 客户端认证头,
-// hop-by-hop 与其余任意客户端头不透传 (默认 outbound 未配时依赖此透传客户端 Authorization)
+// passthroughHeader allowlist: headers actually sent by opencode CLI + client auth,
+// hop-by-hop and other client headers are not forwarded (when outbound not set, relies on forwarding client Authorization)
 func passthroughHeader(k string) bool {
 	if isHopByHop(k) {
 		return false
@@ -325,7 +325,7 @@ func passthroughHeader(k string) bool {
 }
 
 func normalizeProxyPath(p string) string {
-	// 兼容单复数: /response -> /responses, 同时保留子路径如 /responses/xxx
+	// compat singular/plural: /response -> /responses, keep subpath like /responses/xxx
 	if p == "/response" {
 		return "/responses"
 	}
@@ -431,15 +431,15 @@ func (p *Proxy) doLocalBuffered(ctx context.Context, fam string, in *http.Reques
 	}
 	if strings.Contains(resp.Header.Get("Content-Type"), "event-stream") {
 		if p.cfg.Dump {
-			dumpResponse(resp, fmt.Sprintf("本地 IPv%s 响应 %s", fam, in.URL.Path), false)
+			dumpResponse(resp, fmt.Sprintf("local IPv%s response %s", fam, in.URL.Path), false)
 		}
 		if p.cfg.Verbose {
-			log.Printf("[opencode-proxy] %s %s%s -> IPv%s session:%q->%q status=%d stream=false ct=%q cl=%d (event-stream直通)", in.Method, p.cfg.BackendURL, in.URL.Path, fam, incomingSession, outSession, resp.StatusCode, resp.Header.Get("Content-Type"), resp.ContentLength)
+			log.Printf("[opencode-proxy] %s %s%s -> IPv%s session:%q->%q status=%d stream=false ct=%q cl=%d (event-stream passthrough)", in.Method, p.cfg.BackendURL, in.URL.Path, fam, incomingSession, outSession, resp.StatusCode, resp.Header.Get("Content-Type"), resp.ContentLength)
 		}
 		return resp, nil
 	}
 	if p.cfg.Dump {
-		dumpResponse(resp, fmt.Sprintf("本地 IPv%s 响应 %s", fam, in.URL.Path), p.cfg.Verbose)
+		dumpResponse(resp, fmt.Sprintf("local IPv%s response %s", fam, in.URL.Path), p.cfg.Verbose)
 	}
 	if resp.Body != nil {
 		nb, rerr := io.ReadAll(resp.Body)
@@ -480,7 +480,7 @@ func (p *Proxy) doLocalStream(ctx context.Context, fam string, in *http.Request,
 	}
 	isStreamResp := strings.Contains(resp.Header.Get("Content-Type"), "event-stream")
 	if p.cfg.Dump {
-		dumpResponse(resp, fmt.Sprintf("本地 IPv%s 响应 %s", fam, in.URL.Path), false)
+		dumpResponse(resp, fmt.Sprintf("local IPv%s response %s", fam, in.URL.Path), false)
 	}
 	if !isStreamResp && resp.Body != nil && !p.cfg.Dump {
 		nb, rerr := io.ReadAll(resp.Body)
@@ -522,7 +522,7 @@ func (p *Proxy) HandleClusterForward(r *http.Request) (*http.Response, error) {
 	}
 	if resp, err := p.tryLocal(ctx, r, body); err == nil {
 		if p.cfg.Dump {
-			dumpResponse(resp, fmt.Sprintf("集群代理响应 %s (本节点转发)", r.URL.Path), p.cfg.Verbose)
+			dumpResponse(resp, fmt.Sprintf("cluster proxy response %s (local forward)", r.URL.Path), p.cfg.Verbose)
 		}
 		return resp, nil
 	} else if p.cluster == nil || !p.cluster.Enabled() {
@@ -552,7 +552,7 @@ func (p *Proxy) tryLocal(ctx context.Context, r *http.Request, body []byte) (*ht
 			resp.Body.Close()
 			resp.Body = io.NopCloser(bytes.NewReader(b))
 			lastResp = resp
-			lastErr = fmt.Errorf("status %d 可重试", resp.StatusCode)
+			lastErr = fmt.Errorf("status %d retryable", resp.StatusCode)
 			continue
 		}
 		p.egress.MarkAvailable(fam)
@@ -578,7 +578,7 @@ func (p *Proxy) tryLocal(ctx context.Context, r *http.Request, body []byte) (*ht
 			resp.Body.Close()
 			resp.Body = io.NopCloser(bytes.NewReader(b))
 			lastResp = resp
-			lastErr = fmt.Errorf("status %d 可重试", resp.StatusCode)
+			lastErr = fmt.Errorf("status %d retryable", resp.StatusCode)
 			continue
 		}
 		p.egress.MarkAvailable(fam)
@@ -590,10 +590,10 @@ func (p *Proxy) tryLocal(ctx context.Context, r *http.Request, body []byte) (*ht
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, fmt.Errorf("无可用 egress")
+	return nil, fmt.Errorf("no available egress")
 }
 
-// rewriteBodyModel 替换 JSON body 中的 "model" 字段; 非法 JSON 或无该字段时原样返回
+// rewriteBodyModel replaces "model" field in JSON body; returns original if invalid or missing
 func rewriteBodyModel(body []byte, model string) ([]byte, bool) {
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {
@@ -753,9 +753,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						res.resp.Body.Close()
 						lastResp.Body = io.NopCloser(bytes.NewReader(b))
 						if p.cluster != nil && p.cluster.Enabled() {
-							log.Printf("[failover] 本地 IPv%s 返回 %d 可 failover, 尝试对端转发", res.fam, res.resp.StatusCode)
+							log.Printf("[failover] local IPv%s returned %d failover, trying peer", res.fam, res.resp.StatusCode)
 						} else {
-							log.Printf("[retry] 本地 IPv%s 返回 %d 可重试, 尝试备用出口", res.fam, res.resp.StatusCode)
+							log.Printf("[retry] local IPv%s returned %d retryable, trying alternate egress", res.fam, res.resp.StatusCode)
 						}
 						fails++
 						if fails >= 2 {
@@ -817,9 +817,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				hdr := lastResp.Header
 				_ = hdr
 				if p.cluster != nil && p.cluster.Enabled() {
-					log.Printf("[failover] 本地 IPv%s 返回 %d 可 failover, 尝试对端转发", fam, resp.StatusCode)
+					log.Printf("[failover] local IPv%s returned %d failover, trying peer", fam, resp.StatusCode)
 				} else {
-					log.Printf("[retry] 本地 IPv%s 返回 %d 可重试, 尝试备用出口", fam, resp.StatusCode)
+					log.Printf("[retry] local IPv%s returned %d retryable, trying alternate egress", fam, resp.StatusCode)
 				}
 				continue
 			}
@@ -855,9 +855,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				resp.Body.Close()
 				lastResp.Body = io.NopCloser(bytes.NewReader(b))
 				if p.cluster != nil && p.cluster.Enabled() {
-					log.Printf("[failover] 备用 IPv%s 亦 %d 可 failover", fam, resp.StatusCode)
+					log.Printf("[failover] alternate IPv%s also %d failover", fam, resp.StatusCode)
 				} else {
-					log.Printf("[retry] 备用 IPv%s 亦 %d 可重试但已无更多出口", fam, resp.StatusCode)
+					log.Printf("[retry] alternate IPv%s also %d retryable but no more egress", fam, resp.StatusCode)
 				}
 				continue
 			}
@@ -893,12 +893,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			select {
 			case <-notify:
 				resp.Body.Close()
-				log.Printf("[sse] 客户端断开, 中止上游流")
+				log.Printf("[sse] client disconnected, aborting upstream stream")
 				return
 			case err := <-done:
 				resp.Body.Close()
 				if err != nil {
-					log.Printf("[sse] 本地流结束 err=%v", err)
+					log.Printf("[sse] local stream ended err=%v", err)
 				}
 				return
 			}
@@ -917,13 +917,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.cluster != nil && p.cluster.Enabled() {
 		peers := p.cluster.PickPeers(visitedMap)
 		if len(peers) == 0 && lastResp != nil {
-			log.Printf("[failover] 本地 %d 已 failover 但无可用 peer, 将原样返回 %d", lastResp.StatusCode, lastResp.StatusCode)
+			log.Printf("[failover] local %d failover but no available peer, returning %d as-is", lastResp.StatusCode, lastResp.StatusCode)
 		}
 		for _, peer := range peers {
 			if hop+1 > cluster.MaxHop {
 				break
 			}
-			log.Printf("[failover] 尝试对端 %s (hop %d)", peer.Addr, hop+1)
+			log.Printf("[failover] trying peer %s (hop %d)", peer.Addr, hop+1)
 			peerCtx := r.Context()
 			var cancel context.CancelFunc
 			if !isStreamRequest(body) {
@@ -935,23 +935,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				cancel()
 			}
 			if err != nil {
-				log.Printf("[failover] 对端 %s 失败: %v", peer.Addr, err)
+				log.Printf("[failover] peer %s failed: %v", peer.Addr, err)
 				lastErr = err
 				continue
 			}
 			if p.cluster.ShouldFailover(resp.StatusCode, false) {
-				log.Printf("[failover] 对端 %s 亦 %d", peer.Addr, resp.StatusCode)
+				log.Printf("[failover] peer %s also %d", peer.Addr, resp.StatusCode)
 				lastResp = resp
 				b, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				lastResp.Body = io.NopCloser(bytes.NewReader(b))
 				continue
 			}
-			log.Printf("[failover] 对端 %s 成功 %d", peer.Addr, resp.StatusCode)
+			log.Printf("[failover] peer %s succeeded %d", peer.Addr, resp.StatusCode)
 			isStreamPeer := isStreamRequest(body) && resp.StatusCode == 200 && strings.Contains(resp.Header.Get("Content-Type"), "event-stream")
 			if isStreamPeer {
 				if p.cfg.Dump {
-					dumpResponse(resp, fmt.Sprintf("集群对端响应 %s", r.URL.Path), false)
+					dumpResponse(resp, fmt.Sprintf("cluster peer response %s", r.URL.Path), false)
 				}
 				for k, vv := range resp.Header {
 					if strings.EqualFold(k, "Content-Length") {
@@ -977,12 +977,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				select {
 				case <-notify:
 					resp.Body.Close()
-					log.Printf("[sse] 集群对端流 客户端断开, 中止")
+					log.Printf("[sse] cluster peer stream client disconnected, aborting")
 					return
 				case err := <-done:
 					resp.Body.Close()
 					if err != nil {
-						log.Printf("[sse] 集群对端流结束 err=%v", err)
+						log.Printf("[sse] cluster peer stream ended err=%v", err)
 					}
 					return
 				}
@@ -991,7 +991,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			resp.Body.Close()
 			if p.cfg.Dump {
 				respD := &http.Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: io.NopCloser(bytes.NewReader(nb))}
-				dumpResponse(respD, fmt.Sprintf("集群对端响应 %s", r.URL.Path), p.cfg.Verbose)
+				dumpResponse(respD, fmt.Sprintf("cluster peer response %s", r.URL.Path), p.cfg.Verbose)
 			}
 			preview := nb
 			if len(preview) > 200 {
@@ -1026,7 +1026,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if lastErr != nil {
-		log.Printf("[error] 转发 %s %s 失败: %v", r.Method, r.URL.Path, lastErr)
+		log.Printf("[error] forward %s %s failed: %v", r.Method, r.URL.Path, lastErr)
 		http.Error(w, "502 Bad Gateway: "+lastErr.Error(), http.StatusBadGateway)
 		return
 	}

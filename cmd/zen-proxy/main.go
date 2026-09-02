@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	version            = "1.18.58"
+	version            = "1.18.59"
 	opencodeCliVersion = "1.18.24"
 	defaultUserAgent   = "opencode/" + opencodeCliVersion + " ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 	defaultClient      = "cli"
@@ -82,7 +82,7 @@ func usage() {
 	os.Exit(1)
 }
 
-func authSummary(tok string) string { if tok != "" { return "Bearer "+tok }; return "透传客户端Authorization" }
+func authSummary(tok string) string { if tok != "" { return "Bearer "+tok }; return "forward client Authorization" }
 
 func main() {
 	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-v" || os.Args[1] == "version") {
@@ -151,7 +151,7 @@ func main() {
 				switch egressPrefer {
 				case "4", "6", "auto", "d4", "d6", "off":
 				default:
-					fmt.Fprintln(os.Stderr, "错误: --prefer/--egress-prefer 必须是 4/6/auto/d4/d6/off")
+					fmt.Fprintln(os.Stderr, "error: --prefer/--egress-prefer must be 4/6/auto/d4/d6/off")
 					os.Exit(1)
 				}
 			}
@@ -160,7 +160,7 @@ func main() {
 				i++
 				dur, err := time.ParseDuration(extraArgs[i])
 				if err != nil || dur <= 0 {
-					fmt.Fprintf(os.Stderr, "错误: --ip-interval 需要合法时长, 如 5m")
+					fmt.Fprintf(os.Stderr, "error: --ip-interval requires valid duration, e.g. 5m")
 					os.Exit(1)
 				}
 				probeInterval = dur
@@ -180,7 +180,7 @@ func main() {
 				i++
 				dur, err := time.ParseDuration(extraArgs[i])
 				if err != nil || dur <= 0 {
-					fmt.Fprintf(os.Stderr, "错误: --proxy-probe-interval 需要合法时长, 如 30s")
+					fmt.Fprintf(os.Stderr, "error: --proxy-probe-interval requires valid duration, e.g. 30s")
 					os.Exit(1)
 				}
 				proxyProbeInterval = dur
@@ -220,14 +220,14 @@ func main() {
 				extraHeaders = append(extraHeaders, extraArgs[i])
 			}
 		default:
-			fmt.Fprintf(os.Stderr, "未知参数: %s\n", arg)
+			fmt.Fprintf(os.Stderr, "unknown arg: %s\n", arg)
 			usage()
 		}
 	}
 
 	scheme, host, basePath, err := util.ParseBackend(backendArg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 	backendURL := &url.URL{Scheme: scheme, Host: host}
@@ -258,9 +258,9 @@ func main() {
 	}
 	proxyInst := proxy.New(proxyCfg, egressMgr, sess)
 	proxyInst.SetCluster(clusterNode)
-	// 帧处理器直接走 proxy.handleClusterForward: 本地双栈失败后再经集群 ForwardCluster 跳下一 peer
+	// frame handler directly calls proxy.handleClusterForward: after local dual-stack failure, ForwardCluster tries next peer
 	if err := clusterNode.Start(proxyInst.HandleClusterForward); err != nil {
-		fmt.Fprintf(os.Stderr, "集群启动失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cluster start failed: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -268,7 +268,7 @@ func main() {
 
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "错误: 监听 %s 失败: %v\n", listenAddr, err)
+		fmt.Fprintf(os.Stderr, "error: listen %s failed: %v\n", listenAddr, err)
 		os.Exit(1)
 	}
 
@@ -280,39 +280,39 @@ func main() {
 		MaxHeaderBytes: 1 << 20,
 	}
 
-	log.Printf("opencode-zen-proxy 启动 (version %s):", version)
-	log.Printf("  监听: %s (单端口同时接受 IPv4/IPv6)", ln.Addr())
-	log.Printf("  后端: %s//%s  基础路径: %s", scheme, host, basePath)
+	log.Printf("opencode-zen-proxy started (version %s):", version)
+	log.Printf("  listen: %s (single port dual-stack IPv4/IPv6)", ln.Addr())
+	log.Printf("  backend: %s//%s  basePath: %s", scheme, host, basePath)
 	var egressDesc string
 	if egressPrefer == "off" {
-		egressDesc = "强制远端 (不走本地)"
+		egressDesc = "force remote (no local egress)"
 	} else if proxyURL != "" {
-		egressDesc = "代理出口 (优先代理, 不区分 4/6)"
+		egressDesc = "proxy egress (proxy preferred, no 4/6 distinction)"
 	} else {
 		switch egressPrefer {
 		case "d4":
-			egressDesc = "强制 IPv4 (无回退)"
+			egressDesc = "force IPv4 (no fallback)"
 		case "d6":
-			egressDesc = "强制 IPv6 (无回退)"
+			egressDesc = "force IPv6 (no fallback)"
 		case "4":
-			egressDesc = "优先 IPv4, 失败回退 IPv6"
+			egressDesc = "prefer IPv4, fallback IPv6"
 		case "6":
-			egressDesc = "优先 IPv6, 失败回退 IPv4"
+			egressDesc = "prefer IPv6, fallback IPv4"
 		case "auto":
-			egressDesc = "并发竞速 HappyEyeballs (IPv4/IPv6 并发, 快者胜)"
+			egressDesc = "HappyEyeballs race (IPv4/IPv6 concurrent, fastest wins)"
 		}
 	}
 	if proxyURL != "" {
-		log.Printf("  出口策略: %s (X-Egress 头可覆盖) | 失败冷却 %s | 代理探测间隔 %s | 直连探测间隔 %s", egressDesc, egress.UnavailableCool, proxyProbeInterval, probeInterval)
+		log.Printf("  egress: %s (X-Egress override) | cooldown %s | proxy probe %s | direct probe %s", egressDesc, egress.UnavailableCool, proxyProbeInterval, probeInterval)
 	} else {
-		log.Printf("  出口策略: %s (X-Egress 头可覆盖) | 失败冷却 %s | 探测间隔 %s", egressDesc, egress.UnavailableCool, probeInterval)
+		log.Printf("  egress: %s (X-Egress override) | cooldown %s | probe interval %s", egressDesc, egress.UnavailableCool, probeInterval)
 	}
 	if clusterCfg.Token != "" && (clusterCfg.JoinAddr != "" || clusterCfg.ListenAddr != "") {
-		log.Printf("  集群兜底: 双栈均失败时转发至对端 (join=%s listen=%s)", clusterCfg.JoinAddr, clusterCfg.ListenAddr)
+		log.Printf("  cluster fallback: forward to peer on dual-stack failure (join=%s listen=%s)", clusterCfg.JoinAddr, clusterCfg.ListenAddr)
 	} else {
-		log.Printf("  集群兜底: 未启用 (双栈均失败则直接返回错误, 可用 --cluster-join/--cluster-listen 启用)")
+		log.Printf("  cluster fallback: disabled (returns error on failure, enable via --cluster-join/--cluster-listen)")
 	}
-log.Printf("  特征头: User-Agent=%s client=%s project=%s outbound-auth=%s", defaultUserAgent, defaultClient, defaultProject, authSummary(authToken))
+log.Printf("  headers: User-Agent=%s client=%s project=%s outbound-auth=%s", defaultUserAgent, defaultClient, defaultProject, authSummary(authToken))
 	if verbose {
 		util.SetLogLevel("debug")
 	}
@@ -320,11 +320,11 @@ log.Printf("  特征头: User-Agent=%s client=%s project=%s outbound-auth=%s", d
 		util.SetLogLevel(logLevelArg)
 	}
 	if fwdInbound && inboundAuth != "" {
-		log.Printf("  入站校验: 开启 (客户端需 Authorization: Bearer %s); 转发使用同一 token (-F)", inboundAuth)
+		log.Printf("  inbound auth: enabled (client requires Authorization: Bearer %s); forwarding uses same token (-F)", inboundAuth)
 	} else if inboundAuth != "" {
-		log.Printf("  入站校验: 开启 (客户端需 Authorization: Bearer %s)", inboundAuth)
+		log.Printf("  inbound auth: enabled (client requires Authorization: Bearer %s)", inboundAuth)
 	} else {
-		log.Printf("  入站校验: 关闭 (默认)")
+		log.Printf("  inbound auth: disabled (default)")
 	}
 	for _, fam := range []string{"6", "4"} {
 		p := egressMgr.Probes[fam]
@@ -343,36 +343,36 @@ log.Printf("  特征头: User-Agent=%s client=%s project=%s outbound-auth=%s", d
 			continue
 		}
 		if ip := p.CurrentIP(); ip != "" {
-			log.Printf("  出口IP探测[%s]: %s (每 %s), 当前=%s 命名空间=%s", fam, u, probeInterval, ip, egressMgr.NsKey(fam))
+			log.Printf("  egress IP probe[%s]: %s (every %s), current=%s namespace=%s", fam, u, probeInterval, ip, egressMgr.NsKey(fam))
 		} else {
-			log.Printf("  出口IP探测[%s]: %s (每 %s), 未知(退化为%s, 后台重试中)", fam, u, probeInterval, fam)
+			log.Printf("  egress IP probe[%s]: %s (every %s), unknown (degraded to %s, retry in background)", fam, u, probeInterval, fam)
 		}
 	}
 	if proxyURL != "" {
 		if p := egressMgr.Probes["px"]; p != nil {
 			if ip := p.CurrentIP(); ip != "" {
-				log.Printf("  代理出口IP探测: %s (每 %s), 当前=%s 命名空间=%s", probeURL4, proxyProbeInterval, ip, egressMgr.NsKey("px"))
+				log.Printf("  proxy egress IP probe: %s (every %s), current=%s namespace=%s", probeURL4, proxyProbeInterval, ip, egressMgr.NsKey("px"))
 			} else {
-				log.Printf("  代理出口IP探测: %s (每 %s), 未知(退化为px, 后台重试中)", probeURL4, proxyProbeInterval)
+				log.Printf("  proxy egress IP probe: %s (every %s), unknown (degraded to px, retry in background)", probeURL4, proxyProbeInterval)
 			}
 		}
 	}
 	if cacheFile != "" {
-		log.Printf("  会话缓存: 持久化到 %s (按 具体出口IP 隔离)", cacheFile)
+		log.Printf("  session cache: persisted to %s (isolated by egress IP)", cacheFile)
 	} else {
-		log.Printf("  会话缓存: 仅内存 (按 具体出口IP 隔离, 不持久化)")
+		log.Printf("  session cache: memory only (isolated by egress IP, not persisted)")
 	}
 	if clusterNode.Tunnels != nil && clusterNode.Tunnels.Path != "" {
-		log.Printf("  隧道信息: 持久化到 %s (记录建立/关闭/帧数)", clusterNode.Tunnels.Path)
+		log.Printf("  tunnel store: persisted to %s (records open/close/frames)", clusterNode.Tunnels.Path)
 	}
 	if clusterNode.Enabled() {
-		log.Printf("  集群: id=%s listen=%s join=%s failover-on=%v", clusterNode.SelfID(), clusterCfg.ListenAddr, clusterCfg.JoinAddr, clusterCfg.FailoverOn)
+		log.Printf("  cluster: id=%s listen=%s join=%s failover-on=%v", clusterNode.SelfID(), clusterCfg.ListenAddr, clusterCfg.JoinAddr, clusterCfg.FailoverOn)
 	} else {
-		log.Printf("  集群: 未启用 (可用 --cluster-listen/--cluster-join 启用)")
+		log.Printf("  cluster: disabled (enable via --cluster-listen/--cluster-join)")
 	}
-	log.Printf("  示例: GET /a -> %s%s/a", backendURL, basePath)
+	log.Printf("  example: GET /a -> %s%s/a", backendURL, basePath)
 
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("服务异常退出: %v", err)
+		log.Fatalf("server exited unexpectedly: %v", err)
 	}
 }

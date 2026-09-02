@@ -129,13 +129,13 @@ func ParseBackend(arg string) (string, string, string, error) {
 	}
 	parsed, err := url.Parse(u)
 	if err != nil {
-		return "", "", "", fmt.Errorf("解析 backend 失败: %w", err)
+		return "", "", "", fmt.Errorf("failed to parse backend: %w", err)
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", "", "", fmt.Errorf("不支持的 scheme: %s (仅支持 http/https)", parsed.Scheme)
+		return "", "", "", fmt.Errorf("unsupported scheme: %s (only http/https)", parsed.Scheme)
 	}
 	if parsed.Host == "" {
-		return "", "", "", fmt.Errorf("backend 缺少 host: %s", arg)
+		return "", "", "", fmt.Errorf("backend missing host: %s", arg)
 	}
 	basePath := parsed.Path
 	if basePath == "" {
@@ -152,5 +152,5 @@ func IsStackErrStatic(err error) bool {
 		return false
 	}
 	s := err.Error()
-	return strings.Contains(s, "没有可用") || strings.Contains(s, "网络栈不可用") || strings.Contains(s, "network is unreachable") || strings.Contains(s, "no such host")
+	return strings.Contains(s, "no available") || strings.Contains(s, "network stack unavailable") || strings.Contains(s, "network is unreachable") || strings.Contains(s, "no such host")
 }
