@@ -119,17 +119,7 @@ func (p *IPProbe) run() {
 		cur := p.current
 		p.mu.Unlock()
 		if fc > 0 {
-			shift := fc - 1
-			if shift > 10 {
-				shift = 10
-			}
-			d := UnavailableCool * time.Duration(1<<uint(shift))
-			if d > MaxProbeInterval {
-				d = MaxProbeInterval
-			}
-			if d < UnavailableCool {
-				d = MaxProbeInterval
-			}
+			d := util.BackoffDuration(fc, UnavailableCool, MaxProbeInterval)
 			ticker.Reset(d)
 			continue
 		}
@@ -331,17 +321,7 @@ func (m *Manager) MarkUnavailable(fam string, isStack bool) {
 	m.unavailMu.Lock()
 	c := m.unavailCount[fam] + 1
 	m.unavailCount[fam] = c
-	shift := c - 1
-	if shift > 10 {
-		shift = 10
-	}
-	d := UnavailableCool * time.Duration(1<<uint(shift))
-	if d > MaxUnavailableCool {
-		d = MaxUnavailableCool
-	}
-	if d < UnavailableCool {
-		d = MaxUnavailableCool
-	}
+	d := util.BackoffDuration(c, UnavailableCool, MaxUnavailableCool)
 	m.unavail[fam] = time.Now().Add(d)
 	m.unavailMu.Unlock()
 	log.Printf("[egress] %s marked unavailable %s (fail %d, exponential backoff)", famLabel(fam), d, c)

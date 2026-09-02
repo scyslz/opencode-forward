@@ -891,14 +891,7 @@ func (n *Node) joinLoop() {
 		if err != nil {
 			if isAuthErr(err) {
 				authFails++
-				shift := authFails - 1
-				if shift > 10 {
-					shift = 10
-				}
-				d := 10 * time.Second * time.Duration(1<<uint(shift))
-				if d > 3*time.Minute {
-					d = 3 * time.Minute
-				}
+				d := util.BackoffDuration(authFails, 10*time.Second, 3*time.Minute)
 				log.Printf("[cluster] join %s auth failed, retry after %s (%d consecutive)", n.cfg.JoinAddr, d, authFails)
 				time.Sleep(d)
 			} else {
@@ -928,18 +921,7 @@ func (n *Node) joinLoop() {
 }
 
 func peerBackoffDuration(failCount int) time.Duration {
-	if failCount <= 0 {
-		return 30 * time.Second
-	}
-	shift := failCount - 1
-	if shift > 10 {
-		shift = 10
-	}
-	d := 30 * time.Second * time.Duration(1<<uint(shift))
-	if d > time.Hour {
-		d = time.Hour
-	}
-	return d
+	return util.BackoffDuration(failCount, 30*time.Second, time.Hour)
 }
 
 func (n *Node) probeLoop() {

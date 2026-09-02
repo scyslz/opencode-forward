@@ -154,3 +154,18 @@ func IsStackErrStatic(err error) bool {
 	s := err.Error()
 	return strings.Contains(s, "no available") || strings.Contains(s, "network stack unavailable") || strings.Contains(s, "network is unreachable") || strings.Contains(s, "no such host")
 }
+
+func BackoffDuration(failCount int, base, max time.Duration) time.Duration {
+	if failCount <= 0 {
+		return base
+	}
+	shift := failCount - 1
+	if shift > 10 {
+		shift = 10
+	}
+	d := base * time.Duration(1<<uint(shift))
+	if d > max {
+		d = max
+	}
+	return d
+}
